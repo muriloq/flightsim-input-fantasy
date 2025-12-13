@@ -302,8 +302,12 @@
   }
 
   function updateControlsInertia(dt) {
-    if (keysDown.has("q")) TC = TC + 0.2 * (TC < 8.8 ? 1 : 0);
-    if (keysDown.has("e")) TC = TC - 0.2 * (TC > 0.2 ? 1 : 0);
+    // Throttle change is time-based (so it doesn't depend on sim tick rate).
+    // Preserve the old 60Hz feel: 0.2 per tick @60Hz => 12.0 units per second.
+    const TC_RATE = 12.0;
+    if (keysDown.has("q")) TC += TC_RATE * dt;
+    if (keysDown.has("e")) TC -= TC_RATE * dt;
+    TC = clamp(TC, 0.2, 8.8);
 
     let rollIn = 0;
     if (keysDown.has("a") || keysDown.has("z")) rollIn -= 1;
@@ -351,7 +355,11 @@
   // --- Update velocities from the updated heading and airspeed ---
   computeVX_VY_fromHeading();
 
-  VZ = VV * Math.sin(PT * C) - 10 + VV / 15;
+  // Vertical velocity: forward-speed vertical component plus simple lift/gravity.
+  // Old code added +VV/15 regardless of pitch; make lift depend on pitch while
+  // preserving trim at PT=0 (cos(0)=1).
+  const lift = (VV / 15) * Math.cos(PT * C);
+  VZ = VV * Math.sin(PT * C) - 10 + lift;
 
   GX = VX + WX;
   GY = VY + WY;
@@ -406,10 +414,10 @@
 
   function computeRunwayBearingRB() {
     if (!started) return 0;
-    if (PY === 0) return 0;
-    let RB = Math.atan(PX / PY) / C;
-    if (PY > 0) RB += 180;
-    if (RB < 0) RB += 360;
+    // Bearing from aircraft to runway origin (0° = +Y / "north", clockwise positive),
+    // matching the original BASIC intent but without the PY==0 singularity.
+    if (PX === 0 && PY === 0) return 0;
+    const RB = Math.atan2(-PX, -PY) / C;
     return wrap360(RB);
   }
 
