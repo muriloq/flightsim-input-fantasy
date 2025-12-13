@@ -274,8 +274,8 @@
     keysDown.clear();
 
     PX = 0;
-    PY = -20000;
-    PZ = 2000;
+    PY = -2000;
+    PZ = 100;
     VV = 150;
 
     AD = 0;
@@ -437,9 +437,11 @@
     let Y4 = YC - 118 * Math.tan(RL * 2 * C);
 
     const horizonClip = clipLineToRect(X3, Y3, X4, Y4, 16, 1, 223, 78);
-    if (!horizonClip) return;
-    [X3, Y3, X4, Y4] = horizonClip;
-    line(X3, Y3, X4, Y4);
+    // If the horizon line is fully outside the window, still draw the runway.
+    // (Previously we returned early, which incorrectly suppressed runway drawing.)
+    if (horizonClip) {
+      line(horizonClip[0], horizonClip[1], horizonClip[2], horizonClip[3]);
+    }
 
     if (!started) return;
 
