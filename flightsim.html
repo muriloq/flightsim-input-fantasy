@@ -189,6 +189,131 @@
     }
   }
 
+  // --- Minimal 3D camera (world meters) for the top window ---
+  function v3(x, y, z) { return { x, y, z }; }
+  function v3sub(a, b) { return { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z }; }
+  function v3add(a, b) { return { x: a.x + b.x, y: a.y + b.y, z: a.z + b.z }; }
+  function v3mul(a, s) { return { x: a.x * s, y: a.y * s, z: a.z * s }; }
+  function v3dot(a, b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+
+  function computeCameraBasis(yawDeg, pitchNoseUpDeg, rollDeg) {
+    // World axes: +X right, +Y forward, +Z up. Camera axes: +x right, +y down, +z forward.
+    const psi = yawDeg * C;
+    const th = pitchNoseUpDeg * C;
+    const ph = rollDeg * C;
+
+    // Start at level flight heading +Y.
+    let f = v3(Math.sin(psi), Math.cos(psi), 0);
+    let r = v3(Math.cos(psi), -Math.sin(psi), 0);
+    let u = v3(0, 0, 1);
+
+    // Pitch about right axis (nose up positive).
+    {
+      const f0 = f, u0 = u;
+      f = v3add(v3mul(f0, Math.cos(th)), v3mul(u0, Math.sin(th)));
+      u = v3add(v3mul(u0, Math.cos(th)), v3mul(f0, -Math.sin(th)));
+    }
+
+    // Roll about forward axis.
+    const r2 = v3add(v3mul(r, Math.cos(ph)), v3mul(u, Math.sin(ph)));
+    const u2 = v3add(v3mul(u, Math.cos(ph)), v3mul(r, -Math.sin(ph)));
+    r = r2; u = u2;
+
+    return { camRight: r, camDown: v3mul(u, -1), camFwd: f };
+  }
+
+  function worldToCamera(pWorld, camPos, basis) {
+    const rel = v3sub(pWorld, camPos);
+    return v3(
+      v3dot(rel, basis.camRight),
+      v3dot(rel, basis.camDown),
+      v3dot(rel, basis.camFwd)
+    );
+  }
+
+  function clipSegmentToNearPlane(p1, p2, nearZ) {
+    // Keep z >= nearZ
+    const z1 = p1.z, z2 = p2.z;
+    const in1 = z1 >= nearZ, in2 = z2 >= nearZ;
+    if (in1 && in2) return [p1, p2];
+    if (!in1 && !in2) return null;
+    const t = (nearZ - z1) / (z2 - z1);
+    const pi = v3add(p1, v3mul(v3sub(p2, p1), t));
+    if (!in1) return [pi, p2];
+    return [p1, pi];
+  }
+
+  function clipPolygonToNearPlane(polyCam, nearZ) {
+    // Sutherland–Hodgman in camera space, keep z >= nearZ
+    const out = [];
+    if (!polyCam || polyCam.length < 3) return out;
+    let S = polyCam[polyCam.length - 1];
+    const Sin = S.z >= nearZ;
+    let SinFlag = Sin;
+    for (const E of polyCam) {
+      const EinFlag = E.z >= nearZ;
+      if (EinFlag) {
+        if (!SinFlag) {
+          const t = (nearZ - S.z) / (E.z - S.z);
+          out.push(v3add(S, v3mul(v3sub(E, S), t)));
+        }
+        out.push(E);
+      } else if (SinFlag) {
+        const t = (nearZ - S.z) / (E.z - S.z);
+        out.push(v3add(S, v3mul(v3sub(E, S), t)));
+      }
+      S = E;
+      SinFlag = EinFlag;
+    }
+    return out;
+  }
+
+  function projectCamToScreen(pCam, intr) {
+    if (pCam.z <= intr.nearZ) return null;
+    const x = intr.cx + intr.f * (pCam.x / pCam.z);
+    const y = intr.cy + intr.f * (pCam.y / pCam.z);
+    if (!isFinite(x) || !isFinite(y)) return null;
+    return [x, y];
+  }
+
+  function lineRectIntersections(A, B, Cc, xmin, xmax, ymin, ymax) {
+    // Line: A*x + B*y + Cc = 0. Return up to 2 unique points on the rectangle boundary.
+    const pts = [];
+    const eps = 1e-9;
+    function addPt(x, y) {
+      if (!isFinite(x) || !isFinite(y)) return;
+      if (x < xmin - 1e-6 || x > xmax + 1e-6 || y < ymin - 1e-6 || y > ymax + 1e-6) return;
+      for (const p of pts) {
+        if (Math.abs(p[0] - x) < 0.25 && Math.abs(p[1] - y) < 0.25) return;
+      }
+      pts.push([x, y]);
+    }
+
+    // x = xmin/xmax -> solve for y
+    if (Math.abs(B) > eps) {
+      addPt(xmin, -(A * xmin + Cc) / B);
+      addPt(xmax, -(A * xmax + Cc) / B);
+    }
+    // y = ymin/ymax -> solve for x
+    if (Math.abs(A) > eps) {
+      addPt(-(B * ymin + Cc) / A, ymin);
+      addPt(-(B * ymax + Cc) / A, ymax);
+    }
+    if (pts.length <= 2) return pts;
+    // If we got more due to corner hits, keep the two farthest apart
+    let best = [pts[0], pts[1]];
+    let bestD = -1;
+    for (let i = 0; i < pts.length; i++) {
+      for (let j = i + 1; j < pts.length; j++) {
+        const dx = pts[i][0] - pts[j][0];
+        const dy = pts[i][1] - pts[j][1];
+        const d = dx * dx + dy * dy;
+        if (d > bestD) { bestD = d; best = [pts[i], pts[j]]; }
+      }
+    }
+    return best;
+  }
+
   // --- Game state ---
   let running = false;
   let ended = false;
@@ -237,6 +362,14 @@
   let TC = 5; // 0.2..8.8
 
   const RT = 3, TP = 5, WR = 50; // landing thresholds: roll, pitch, runway half-width (meters)
+
+  // Runway model used by the renderer/instruments (world meters).
+  // The 3D runway drawing uses a strip starting at Y=0 (touchdown threshold)
+  // extending forward (+Y). Instruments should reference the same runway geometry.
+  const RUNWAY_START_Y = 0;
+  const RUNWAY_LEN_M = 3000;
+  const RUNWAY_END_Y = RUNWAY_START_Y + RUNWAY_LEN_M;
+  const RUNWAY_REF_Y = RUNWAY_START_Y + RUNWAY_LEN_M * 0.5; // instrument reference point on runway
 
   const keysDown = new Set();
   let bWasDown = false;
@@ -613,9 +746,11 @@
     running = false;
     ended = true;
 
-    // Distance to runway origin (meters). This keeps DRIFT and DISTANCE consistent:
+    // Distance to runway reference point (meters). Keeps DRIFT and DISTANCE consistent:
     // DISTANCE is always >= |DRIFT|.
-    const dist = Math.sqrt(PX*PX + PY*PY);
+    const dxr = PX;
+    const dyr = PY - RUNWAY_REF_Y;
+    const dist = Math.sqrt(dxr*dxr + dyr*dyr);
     const vvMps = Math.max(0, h_speed_mph * MPH_TO_MPS);
 
     // Reuse original scoring thresholds (tuned for the landing mini-game).
@@ -650,8 +785,12 @@
 
   function computeRunwayBearingRB() {
     if (!started) return 0;
-    if (PX === 0 && PY === 0) return 0;
-    const RB = Math.atan2(-PX, -PY) / C;
+    // Bearing from aircraft to a runway reference point on the drawn runway strip.
+    // Heading convention: 0° = +Y, clockwise positive, as used by the HUD.
+    const dx = 0 - PX;
+    const dy = RUNWAY_REF_Y - PY;
+    if (dx === 0 && dy === 0) return 0;
+    const RB = Math.atan2(dx, dy) / C;
     return wrap360(RB);
   }
 
@@ -665,73 +804,164 @@
     line(245, 80, 10, 80);
     line(10, 80, 10, 0);
 
-    // C++ model convention: pitch increases in the stall recovery by pitching "down".
-    // For UI consistency with the original landing sim, treat UI pitch as nose-up positive.
-    const uiPitch = -pitch;
-    let YC = 33 + uiPitch * 4;
-    let X3 = 16, X4 = 239;
-    let Y3 = YC + 118 * Math.tan(roll * 2 * C);
-    let Y4 = YC - 118 * Math.tan(roll * 2 * C);
+    const xmin = 16, xmax = 239, ymin = 1, ymax = 79;
+    const vw = (xmax - xmin);
+    const vh = (ymax - ymin);
+    const intr = {
+      cx: (xmin + xmax) * 0.5,
+      cy: (ymin + ymax) * 0.5,
+      f: (vw * 0.5) / Math.tan(60 * C * 0.5),
+      nearZ: 1.0
+    };
 
-    const horizonClip = clipLineToRect(X3, Y3, X4, Y4, 16, 1, 223, 78);
-    if (horizonClip) line(horizonClip[0], horizonClip[1], horizonClip[2], horizonClip[3]);
+    // Camera pose: use aircraft position and attitude.
+    // Model convention: pitch increases when pitching down, so invert to get "nose up".
+    const camPos = v3(PX, PY, PZ);
+    const basis = computeCameraBasis(AD, -pitch, roll);
+
+    // Near plane: keep small. A large nearZ (like 1m) can slice the runway when low,
+    // producing unstable polygons. We keep it small but non-zero to avoid blowups.
+    intr.nearZ = Math.max(0.05, Math.min(0.2, camPos.z * 0.02));
+
+    // Camera-correct horizon line: a*(X-cx)+b*(Y-cy)+c*f = 0
+    // Keep coefficients so the ground-grid can extend up to the horizon.
+    let horizonA = 0, horizonB = 0, horizonC = 0;
+    {
+      const worldUp = v3(0, 0, 1);
+      const a = v3dot(basis.camRight, worldUp);
+      const b = v3dot(basis.camDown, worldUp);
+      const c = v3dot(basis.camFwd, worldUp);
+      const A = a;
+      const B = b;
+      const Cc = c * intr.f - a * intr.cx - b * intr.cy;
+      horizonA = A; horizonB = B; horizonC = Cc;
+      const pts = lineRectIntersections(A, B, Cc, xmin, xmax, ymin, ymax);
+      if (pts.length === 2) line(pts[0][0], pts[0][1], pts[1][0], pts[1][1]);
+    }
 
     if (!started) return;
 
-    const xmin = 16, xmax = 239, ymin = 1, ymax = 79;
-    const RB = computeRunwayBearingRB();
+    // --- Ground grid (500m spacing) on Z=0 ---
+    ctx.strokeStyle = "#666";
+    const GRID = 500;
 
-    let WB = AD;
-    if (AD > 180) WB -= 360;
-    if (RB > 180) WB = WB + 360 - RB;
-    else WB = WB - RB;
-
-    const d = Math.sqrt((X3 - X4) ** 2 + (Y3 - Y4) ** 2);
-    if (!isFinite(d) || d === 0) return;
-    const AN = 118 / (60 * d);
-
-    let X7 = (X3 + X4) / 2 + sgn(X3 - X4) + WB * AN * (X3 - X4);
-    let Y7 = (Y3 + Y4) / 2 + 2 + WB * AN * (Y3 - Y4);
-
-    if (!isFinite(X7) || !isFinite(Y7)) return;
-    X7 = clamp(X7, xmin, xmax);
-    Y7 = clamp(Y7, ymin, ymax);
-
-    const pyAbs = Math.max(1, Math.abs(PY));
-    let R = (pyAbs < 1000) ? (8 - Y7 / 10) : (4000 / pyAbs);
-    R = clamp(R, 0.4, 8);
-
-    const theta = -roll * 2 * C;
-    const cs = Math.cos(theta), sn = Math.sin(theta);
-    function toScreen(lx, ly) { return [lx * cs - ly * sn + X7, lx * sn + ly * cs + Y7]; }
-
-    const R5 = 5 * R;
-    if (R < 1) {
-      const p1 = toScreen(0, -2), p2 = toScreen(0, 2);
-      const seg = clipLineToRect(p1[0], p1[1], p2[0], p2[1], xmin, ymin, xmax - xmin, ymax - ymin);
-      if (seg) line(seg[0], seg[1], seg[2], seg[3]);
-      return;
+    function screenRayDirWorld(x, y) {
+      // Camera ray through pixel (x,y). Camera coordinates: z forward, y down.
+      const dx = (x - intr.cx) / intr.f;
+      const dy = (y - intr.cy) / intr.f;
+      // World dir = camRight*dx + camDown*dy + camFwd*1
+      return v3add(v3add(v3mul(basis.camRight, dx), v3mul(basis.camDown, dy)), basis.camFwd);
     }
 
-    const yNear = clamp(2 * R5, 8, 140);
-    const farHalfW  = Math.max(1, 0.9 * R);
-    const nearHalfW = Math.max(2, 3.5 * R);
+    function intersectRayWithGroundZ0(dirWorld) {
+      // Ray: camPos + t*dirWorld, ground plane z=0.
+      const eps = 1e-9;
+      if (dirWorld.z >= -eps) return null; // not pointing toward ground
+      const t = (0 - camPos.z) / dirWorld.z;
+      if (!isFinite(t) || t <= 0) return null;
+      return v3add(camPos, v3mul(dirWorld, t));
+    }
 
-    const FL = toScreen(-farHalfW, 0);
-    const FR = toScreen( farHalfW, 0);
-    const NR = toScreen( nearHalfW, yNear);
-    const NL = toScreen(-nearHalfW, yNear);
+    // Find a y coordinate just below the horizon (at screen center).
+    let yH = null;
+    if (Math.abs(horizonB) > 1e-9) {
+      yH = -(horizonA * intr.cx + horizonC) / horizonB;
+    }
+    const ySample = clamp((yH == null ? intr.cy : (yH + 1)), ymin, ymax);
 
-    const clippedPoly = clipPolygonRect([FL, FR, NR, NL], xmin, xmax, ymin, ymax);
-    if (clippedPoly.length < 2) return;
-    drawPolygon(clippedPoly);
+    // Estimate "visible-to-horizon" ground distance by intersecting a few rays
+    // just below the horizon and at the bottom of the viewport.
+    const samplePts = [
+      [xmin, ySample],
+      [intr.cx, ySample],
+      [xmax, ySample],
+      [xmin, ymax],
+      [intr.cx, ymax],
+      [xmax, ymax],
+    ];
+    let farDist = 0;
+    for (const [sx, sy] of samplePts) {
+      const hit = intersectRayWithGroundZ0(screenRayDirWorld(sx, sy));
+      if (!hit) continue;
+      const d = Math.hypot(hit.x - PX, hit.y - PY);
+      if (isFinite(d) && d > farDist) farDist = d;
+    }
+    // Safety margins & caps (avoid huge line counts while still reaching the horizon visually).
+    farDist = Math.min(Math.max(farDist * 1.15, 3000), 250000);
 
-    const dashStep = 5, dashLen = 2;
-    for (let ly = 2; ly < yNear; ly += dashStep) {
-      const p1 = toScreen(0, ly);
-      const p2 = toScreen(0, Math.min(yNear, ly + dashLen));
-      const seg = clipLineToRect(p1[0], p1[1], p2[0], p2[1], xmin, ymin, xmax - xmin, ymax - ymin);
+    // Also ensure the grid spans at least twice the distance to the runway (origin).
+    const distToRunway = Math.hypot(PX, PY);
+    const RANGE = Math.max(farDist, 2 * distToRunway);
+
+    const x0 = Math.floor((PX - RANGE) / GRID) * GRID;
+    const x1 = Math.ceil((PX + RANGE) / GRID) * GRID;
+    const y0 = Math.floor((PY - RANGE) / GRID) * GRID;
+    const y1 = Math.ceil((PY + RANGE) / GRID) * GRID;
+
+    function drawWorldSegment(pw1, pw2) {
+      let p1c = worldToCamera(pw1, camPos, basis);
+      let p2c = worldToCamera(pw2, camPos, basis);
+      const clipped = clipSegmentToNearPlane(p1c, p2c, intr.nearZ);
+      if (!clipped) return;
+      p1c = clipped[0]; p2c = clipped[1];
+      const s1 = projectCamToScreen(p1c, intr);
+      const s2 = projectCamToScreen(p2c, intr);
+      if (!s1 || !s2) return;
+      const seg = clipLineToRect(s1[0], s1[1], s2[0], s2[1], xmin, ymin, vw, vh);
       if (seg) line(seg[0], seg[1], seg[2], seg[3]);
+    }
+
+    for (let y = y0; y <= y1; y += GRID) {
+      drawWorldSegment(v3(x0, y, 0), v3(x1, y, 0));
+    }
+    for (let x = x0; x <= x1; x += GRID) {
+      drawWorldSegment(v3(x, y0, 0), v3(x, y1, 0));
+    }
+
+    // --- Runway as a true world rectangle on Z=0 ---
+    // The landing game measures distance to the runway touchdown point at (0,0).
+    // To keep the runway stable on approach (PY starts negative), define the runway
+    // starting at Y=0 and extending forward (+Y), rather than centered at the origin.
+    ctx.strokeStyle = "#fff";
+    // (RUNWAY_START_Y / RUNWAY_END_Y are defined above)
+    const rw = WR;
+    const runwayWorld = [
+      v3(-rw, RUNWAY_START_Y, 0),
+      v3( rw, RUNWAY_START_Y, 0),
+      v3( rw, RUNWAY_END_Y, 0),
+      v3(-rw, RUNWAY_END_Y, 0),
+    ];
+
+    const runwayCam = runwayWorld.map(p => worldToCamera(p, camPos, basis));
+    const runwayCamClipped = clipPolygonToNearPlane(runwayCam, intr.nearZ);
+    if (runwayCamClipped.length >= 3) {
+      const runwayScr = runwayCamClipped.map(p => projectCamToScreen(p, intr));
+      // If any vertex failed projection (should be rare after near-plane clipping),
+      // bail out rather than drawing a malformed polygon that can flicker.
+      if (runwayScr.some(p => !p)) return;
+      const runwayPoly = clipPolygonRect(runwayScr, xmin, xmax, ymin, ymax);
+      if (runwayPoly.length >= 3) {
+        // Mask the grid inside the runway by filling with background color.
+        ctx.fillStyle = "#000";
+        ctx.beginPath();
+        ctx.moveTo(runwayPoly[0][0], runwayPoly[0][1]);
+        for (let i = 1; i < runwayPoly.length; i++) ctx.lineTo(runwayPoly[i][0], runwayPoly[i][1]);
+        ctx.closePath();
+        ctx.fill();
+
+        // Outline runway.
+        ctx.strokeStyle = "#fff";
+        drawPolygon(runwayPoly);
+
+        // Centerline dashes (world space along runway center x=0)
+        const dashStep = 100;
+        const dashLen = 40;
+        for (let yy = RUNWAY_START_Y; yy < RUNWAY_END_Y; yy += dashStep) {
+          const a = v3(0, yy, 0);
+          const b = v3(0, Math.min(RUNWAY_END_Y, yy + dashLen), 0);
+          drawWorldSegment(a, b);
+        }
+      }
     }
   }
 
@@ -770,8 +1000,8 @@
     }
 
     const RB = started ? computeRunwayBearingRB() : 0;
-    // Distance to runway origin (meters)
-    const dist = started ? Math.sqrt(PX*PX + PY*PY) : 0;
+    // Distance to runway reference point (meters)
+    const dist = started ? Math.sqrt(PX*PX + (PY - RUNWAY_REF_Y)*(PY - RUNWAY_REF_Y)) : 0;
 
     const vvMps = Math.max(0, h_speed_mph * MPH_TO_MPS);
 
