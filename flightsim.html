@@ -1,0 +1,889 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>FlightRTSim – C++ Flight Model (HTML5)</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin:0; background:#000; color:#fff; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    .wrap { max-width: 980px; margin:0 auto; padding:16px; display:grid; gap:12px; }
+    .panel { background:#000; border:1px solid #444; border-radius:10px; padding:12px; }
+    label { display:block; margin:8px 0 4px; }
+    input { width:170px; padding:6px 8px; background:#050505; border:1px solid #777; border-radius:6px; color:#fff; }
+    button { padding:8px 10px; border-radius:8px; border:1px solid #999; background:#111; color:#fff; cursor:pointer; }
+    button:hover { background:#222; }
+    canvas { display:block; width:100%; height:auto; image-rendering: pixelated; background:#000; border:1px solid #fff; border-radius:4px; }
+    .row { display:flex; gap:12px; flex-wrap:wrap; align-items:end; }
+    .hint { margin-top:8px; font-size:0.95rem; opacity:0.95; }
+    .kbd { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; padding:1px 6px; border:1px solid #777; border-radius:6px; background:#111; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="panel">
+      <div class="row">
+        <div>
+          <label>Velocidade do vento (1–50 m/s)</label>
+          <input id="windSpeed" type="number" min="1" max="50" value="10" />
+        </div>
+        <div>
+          <label>Direção do vento (0–359 graus)</label>
+          <input id="windDir" type="number" min="0" max="359" value="0" />
+        </div>
+        <div>
+          <button id="startBtn">Iniciar voo</button>
+        </div>
+      </div>
+      <div class="hint">
+        Controles:
+        <span class="kbd">Q</span>/<span class="kbd">E</span> potência,
+        <span class="kbd">A</span>/<span class="kbd">D</span> rolagem,
+        <span class="kbd">W</span>/<span class="kbd">S</span> arfagem (invertido),
+        <span class="kbd">Z</span>/<span class="kbd">C</span> leme,
+        <span class="kbd">B</span> freio.
+        No fim: <span class="kbd">S</span> novo voo, <span class="kbd">N</span> parar.
+      </div>
+    </div>
+
+    <canvas id="screen" width="256" height="192" aria-label="Tela do simulador"></canvas>
+  </div>
+
+<script>
+(() => {
+  const W = 256, H = 192;
+  const canvas = document.getElementById("screen");
+  const ctx = canvas.getContext("2d", { alpha: false });
+  ctx.imageSmoothingEnabled = false;
+
+  const PI = Math.PI;
+  const C = PI / 180;
+
+  const SIM_HZ = 60;
+  const DT = 1 / SIM_HZ;
+  const MAX_CATCHUP_STEPS = 6;
+
+  // --- Unit conversions (C++ model tuning is imperial-ish) ---
+  const FT_TO_M = 0.3048;
+  const M_TO_FT = 1 / FT_TO_M;
+  const MPH_TO_MPS = 0.44704;
+  const MPS_TO_MPH = 1 / MPH_TO_MPS;
+
+  // --- Control effectiveness tuning (ported model was tuned for a different sim/context) ---
+  // Lower values = slower response.
+  // Requested tuning: elevator 2x slower, ailerons 5x slower (relative to previous values).
+  const AILERON_GAIN = 0.4;   // 2.0 / 5
+  const ELEVATOR_GAIN = 0.75; // 1.5 / 2
+  const RUDDER_GAIN = 0.35;   // reduce yaw authority from rudder (Z/C)
+
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const wrap360 = (deg) => {
+    deg %= 360;
+    if (deg < 0) deg += 360;
+    return deg;
+  };
+  const sgn = (x) => (x < 0 ? -1 : x > 0 ? 1 : 0);
+  const rnd = (x) => Math.round(x);
+
+  function clearScreen() {
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, 0, W, H);
+  }
+  function line(x1, y1, x2, y2) {
+    x1 = rnd(x1); y1 = rnd(y1);
+    x2 = rnd(x2); y2 = rnd(y2);
+    ctx.beginPath();
+    ctx.moveTo(x1 + 0.5, y1 + 0.5);
+    ctx.lineTo(x2 + 0.5, y2 + 0.5);
+    ctx.stroke();
+  }
+  function circle(cx, cy, r) {
+    cx = rnd(cx); cy = rnd(cy);
+    ctx.beginPath();
+    ctx.arc(cx + 0.5, cy + 0.5, r, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  function needle(cx, cy, len, aRad) {
+    const x2 = cx + len * Math.sin(aRad);
+    const y2 = cy - len * Math.cos(aRad);
+    line(cx, cy, x2, y2);
+  }
+  function textCentered(cx, y, s) {
+    const w = ctx.measureText(s).width;
+    ctx.fillText(s, rnd(cx - w / 2), rnd(y));
+  }
+
+  // Liang–Barsky line clipping
+  function clipLineToRect(x1, y1, x2, y2, rx, ry, rw, rh) {
+    let t0 = 0, t1 = 1;
+    const dx = x2 - x1, dy = y2 - y1;
+    function clip(p, q) {
+      if (p === 0) return q >= 0;
+      const r = q / p;
+      if (p < 0) { if (r > t1) return false; if (r > t0) t0 = r; }
+      else       { if (r < t0) return false; if (r < t1) t1 = r; }
+      return true;
+    }
+    if (
+      clip(-dx, x1 - rx) &&
+      clip( dx, (rx + rw) - x1) &&
+      clip(-dy, y1 - ry) &&
+      clip( dy, (ry + rh) - y1)
+    ) {
+      const nx1 = x1 + t0 * dx, ny1 = y1 + t0 * dy;
+      const nx2 = x1 + t1 * dx, ny2 = y1 + t1 * dy;
+      return [nx1, ny1, nx2, ny2];
+    }
+    return null;
+  }
+
+  // Polygon clipping (Sutherland–Hodgman) against axis-aligned rectangle
+  function clipPolygonRect(poly, xmin, xmax, ymin, ymax) {
+    function clipEdge(points, insideFn, intersectFn) {
+      const out = [];
+      if (!points.length) return out;
+      let S = points[points.length - 1];
+      for (const E of points) {
+        const Ein = insideFn(E);
+        const Sin = insideFn(S);
+        if (Ein) {
+          if (!Sin) out.push(intersectFn(S, E));
+          out.push(E);
+        } else if (Sin) {
+          out.push(intersectFn(S, E));
+        }
+        S = E;
+      }
+      return out;
+    }
+
+    function intersectX(p1, p2, x) {
+      const [x1,y1] = p1, [x2,y2] = p2;
+      const dx = x2 - x1;
+      if (dx === 0) return [x, y1];
+      const t = (x - x1) / dx;
+      return [x, y1 + t * (y2 - y1)];
+    }
+    function intersectY(p1, p2, y) {
+      const [x1,y1] = p1, [x2,y2] = p2;
+      const dy = y2 - y1;
+      if (dy === 0) return [x1, y];
+      const t = (y - y1) / dy;
+      return [x1 + t * (x2 - x1), y];
+    }
+
+    let out = poly.slice();
+    out = clipEdge(out, p => p[0] >= xmin, (s,e) => intersectX(s,e,xmin));
+    out = clipEdge(out, p => p[0] <= xmax, (s,e) => intersectX(s,e,xmax));
+    out = clipEdge(out, p => p[1] >= ymin, (s,e) => intersectY(s,e,ymin));
+    out = clipEdge(out, p => p[1] <= ymax, (s,e) => intersectY(s,e,ymax));
+    return out;
+  }
+
+  function drawPolygon(poly) {
+    if (!poly || poly.length < 2) return;
+    for (let i = 0; i < poly.length; i++) {
+      const a = poly[i];
+      const b = poly[(i + 1) % poly.length];
+      line(a[0], a[1], b[0], b[1]);
+    }
+  }
+
+  // --- Game state ---
+  let running = false;
+  let ended = false;
+  let started = false;
+  let endMessage = [];
+
+  // Landing-game coordinates (metric)
+  let PX = 0, PY = 0, PZ = 0; // meters; PZ is altitude above runway plane
+  let VX = 0, VY = 0, VZ = 0; // m/s (derived from flight model)
+  let GX = 0, GY = 0, GZ = 0; // m/s with wind
+  let AD = 0;                 // heading degrees (0..360)
+
+  // Wind (metric, m/s)
+  let WX = 0, WY = 0;
+
+  // --- C++ flight-model state (ported) ---
+  // Control surfaces (reduced indices, -15..+15)
+  let aileron_pos = 0;
+  let elevator_pos = 0;
+  let rudder_pos = 0;
+  let brake = true;
+
+  // Engine / power
+  let ignition_on = true;
+  let engine_on = true;
+  let throttle_pos = 0; // scaled from TC for C++ formulas
+  let rpm = 0;
+
+  // Attitude (degrees)
+  let roll = 0;
+  let pitch = 0;
+  let yaw = 0; // degrees, mapped to AD
+
+  // Speeds tuned like C++ (mostly mph and feet-per-loop)
+  let h_speed_mph = 0;       // horizontal speed (mph)
+  let v_speed_ft = 0;        // vertical displacement per loop (feet/loop)
+  let delta_z_ft = 0;        // forward displacement per loop (feet/loop)
+  let efAOF_rad = 0;         // effective angle of flight (radians)
+  let stall = false;
+  let airborne = true;
+
+  // Rotational deltas (degrees per loop; C++ labels deg/ms but applies as deg/loop)
+  const deltaVect = { dPitch: 0, dYaw: 0, dRoll: 0 };
+
+  // User-facing throttle knob (kept for RPM dial behavior)
+  let TC = 5; // 0.2..8.8
+
+  const RT = 3, TP = 5, WR = 50; // landing thresholds: roll, pitch, runway half-width (meters)
+
+  const keysDown = new Set();
+  let bWasDown = false;
+
+  window.addEventListener("keydown", (e) => {
+    const k = e.key.toLowerCase();
+
+    // End screen choices: ignore repeats so holding a key won't restart instantly.
+    if (ended && (k === "s" || k === "n")) {
+      if (e.repeat) return;
+      if (k === "s") document.getElementById("startBtn").click();
+      else if (k === "n") {
+        running = false;
+        ended = true;
+        endMessage = ["Encerrado.", "Recarregue a página para jogar novamente."];
+      }
+      return;
+    }
+
+    keysDown.add(k);
+  });
+  window.addEventListener("keyup", (e) => keysDown.delete(e.key.toLowerCase()));
+
+  function setDemoScreenState() {
+    running = false;
+    ended = false;
+    endMessage = [];
+    PX = 0; PY = 0; PZ = 0;
+    VX = 0; VY = 0; VZ = 0;
+    GX = 0; GY = 0; GZ = 0;
+    AD = 0;
+    WX = 0; WY = 0;
+
+    aileron_pos = 0;
+    elevator_pos = 0;
+    rudder_pos = 0;
+    brake = true;
+    ignition_on = true;
+    engine_on = true;
+    throttle_pos = 0;
+    rpm = 0;
+    roll = 0;
+    pitch = 0;
+    yaw = 0;
+    h_speed_mph = 0;
+    v_speed_ft = 0;
+    delta_z_ft = 0;
+    efAOF_rad = 0;
+    stall = false;
+    airborne = true;
+    deltaVect.dPitch = deltaVect.dYaw = deltaVect.dRoll = 0;
+    TC = 5;
+
+    bWasDown = false;
+    keysDown.clear();
+  }
+
+  function resetGame(windSpeed, windDir) {
+    ended = false;
+    endMessage = [];
+    keysDown.clear();
+
+    // Start position (metric)
+    PX = 0;
+    PY = -10000;
+    PZ = 1500;
+
+    // Start attitude
+    roll = 0;
+    pitch = 0;
+    yaw = 0;
+    AD = 0;
+
+    // Start throttle / engine
+    TC = 5;
+    ignition_on = true;
+    engine_on = true;
+
+    // Start speed: match previous game feel (150 m/s) but keep C++ mph state.
+    h_speed_mph = 150 * MPS_TO_MPH;
+
+    // Initialize rpm near nominal for TC
+    throttle_pos = clamp(TC * 8.5, 0, 75);
+    rpm = 375 + throttle_pos * 117;
+
+    // Wind scaling from original BASIC: windSpeed/3
+    const X0 = windSpeed / 3;
+    const X1 = windDir;
+    WY = X0 * Math.cos(X1 * C);
+    WX = -X0 * Math.sin(X1 * C);
+
+    // Controls reset
+    aileron_pos = 0;
+    elevator_pos = 0;
+    rudder_pos = 0;
+    brake = false;
+    stall = false;
+    airborne = true;
+    deltaVect.dPitch = deltaVect.dYaw = deltaVect.dRoll = 0;
+    v_speed_ft = 0;
+    delta_z_ft = 0;
+    efAOF_rad = 0;
+
+    running = true;
+  }
+
+  function rads(deg) {
+    if (deg < 0) deg += 360;
+    return deg * C;
+  }
+  function degs(rad) {
+    return rad / C;
+  }
+
+  function updateControls(dt) {
+    // Throttle change is time-based. Preserve ~0.2 per tick @60Hz feel.
+    const TC_RATE = 12.0;
+    if (keysDown.has("q")) TC += TC_RATE * dt;
+    if (keysDown.has("e")) TC -= TC_RATE * dt;
+    TC = clamp(TC, 0.2, 8.8);
+
+    // Toggle brakes (edge-triggered)
+    const bDown = keysDown.has("b");
+    if (bDown && !bWasDown) brake = !brake;
+    bWasDown = bDown;
+
+    // Roll: A/D
+    let rollIn = 0;
+    if (keysDown.has("a")) rollIn -= 1;
+    if (keysDown.has("d")) rollIn += 1;
+
+    // Pitch: W nose up, S nose down (inverted compared to the prior mapping).
+    let pitchIn = 0;
+    if (keysDown.has("w")) pitchIn += 1;
+    if (keysDown.has("s")) pitchIn -= 1;
+
+    // Rudder: Z/C
+    let rudderIn = 0;
+    if (keysDown.has("z")) rudderIn += 1;
+    if (keysDown.has("c")) rudderIn -= 1;
+
+    // Control surfaces: self-centering with a smooth first-order response.
+    // The straight port that *integrates* surface position can "wind up" and
+    // keep rolling/looping even after keys are released. This makes the sim
+    // far more controllable while still using the C++ dynamics core.
+    const AIL_TARGET = rollIn * 15;
+    const ELE_TARGET = pitchIn * 15;
+    // Rudder gets a smaller target deflection to keep yaw more manageable.
+    const RUD_TARGET = rudderIn * 8;
+    const SURF_RESP = 5.0; // 1/s (lower = slower to respond and slower to return to center)
+    const alpha = 1 - Math.exp(-SURF_RESP * dt);
+    aileron_pos = clamp(aileron_pos + (AIL_TARGET - aileron_pos) * alpha, -15, 15);
+    elevator_pos = clamp(elevator_pos + (ELE_TARGET - elevator_pos) * alpha, -15, 15);
+
+    rudder_pos = clamp(rudder_pos + (RUD_TARGET - rudder_pos) * alpha, -15, 15);
+
+    // Throttle position for C++ formulas (0..~75)
+    throttle_pos = clamp(TC * 8.5, 0, 75);
+  }
+
+  function calcPowerDyn(loopTimeMs) {
+    if (ignition_on) {
+      if (!engine_on) engine_on = true;
+      const nominal = 375 + (throttle_pos * 117);
+      if (rpm < nominal) rpm += loopTimeMs * 0.5;
+      if (rpm > nominal) rpm -= loopTimeMs * 0.5;
+    } else {
+      if (engine_on) engine_on = false;
+      if (rpm) rpm -= (loopTimeMs / 2);
+    }
+    if (rpm < 0) rpm = 0;
+  }
+
+  function calcFlightDyn(loopTimeMs) {
+    // Port of AirCraft::CalcFlightDyn with the same tuning assumptions.
+    let iSpeed = rpm / 17.5;
+    iSpeed += (pitch * 1.5);
+
+    let hAccel = ((rpm * (iSpeed - h_speed_mph)) / 10000);
+    hAccel /= 1000;
+    hAccel *= loopTimeMs;
+
+    if (brake && !airborne) {
+      if (h_speed_mph > 0) h_speed_mph -= 1;
+      else h_speed_mph = 0;
+    } else {
+      h_speed_mph += hAccel;
+    }
+
+    // Lift curve
+    let lSpeed = (h_speed_mph / 65) - 1;
+    if (lSpeed > 1) lSpeed = 1;
+    let lVeloc = degs(Math.atan(lSpeed));
+    lVeloc += 45;
+    lVeloc /= 5.29;
+    lVeloc *= (-(pitch * 0.157) + 1);
+    lVeloc /= 1000;
+    lVeloc *= loopTimeMs;
+
+    // Gravity term (C++ uses -16 ft/sec)
+    const GRAV_C_FTPS = -16.0;
+    const gVeloc = loopTimeMs * (GRAV_C_FTPS / 1000);
+    v_speed_ft = gVeloc + lVeloc;
+    if ((!airborne) && (v_speed_ft < 0)) v_speed_ft = 0;
+
+    // Forward displacement from mph
+    delta_z_ft = h_speed_mph * 5280;
+    delta_z_ft /= 3600000;
+    delta_z_ft *= loopTimeMs;
+
+    // Effective angle of flight
+    if (delta_z_ft) efAOF_rad = -(Math.atan(v_speed_ft / delta_z_ft));
+    else efAOF_rad = -(Math.atan(v_speed_ft));
+
+    const AOA = degs(efAOF_rad);
+
+    // Stall logic (ported)
+    if (((pitch < AOA) && (AOA < 0)) && (h_speed_mph < 40)) {
+      if ((pitch - AOA) < -20) stall = true;
+    }
+    if (stall) {
+      if (pitch > 30) stall = false;
+      else pitch++;
+    }
+  }
+
+  function inertialDamp() {
+    if (deltaVect.dPitch) {
+      deltaVect.dPitch -= deltaVect.dPitch / 10;
+      if (((deltaVect.dPitch > 0) && (deltaVect.dPitch < 0.01)) ||
+          ((deltaVect.dPitch < 0) && (deltaVect.dPitch > -0.01))) {
+        deltaVect.dPitch = 0;
+      }
+    }
+    if (deltaVect.dYaw) {
+      deltaVect.dYaw -= deltaVect.dYaw / 10;
+      if (((deltaVect.dYaw > 0) && (deltaVect.dYaw < 0.01)) ||
+          ((deltaVect.dYaw < 0) && (deltaVect.dYaw > -0.01))) {
+        deltaVect.dYaw = 0;
+      }
+    }
+    if (deltaVect.dRoll) {
+      deltaVect.dRoll -= deltaVect.dRoll / 10;
+      if (((deltaVect.dRoll > 0) && (deltaVect.dRoll < 0.01)) ||
+          ((deltaVect.dRoll < 0) && (deltaVect.dRoll > -0.01))) {
+        deltaVect.dRoll = 0;
+      }
+    }
+  }
+
+  function calcTurnRate() {
+    let torque = 0.0;
+    if ((roll > 0) && (roll <= 90)) torque = (roll * 0.00050);
+    else if ((roll < 0) && (roll >= -90)) torque = (roll * 0.00050);
+    return torque;
+  }
+
+  function calcROC(loopTimeMs) {
+    let torque;
+    if (airborne) {
+      if (aileron_pos !== 0) {
+        torque = ((h_speed_mph * aileron_pos) / 10000);
+        if (deltaVect.dRoll !== (torque * loopTimeMs)) deltaVect.dRoll += torque * AILERON_GAIN;
+      }
+    }
+    if (elevator_pos !== 0) {
+      torque = ((h_speed_mph * elevator_pos) / 10000);
+      if ((!airborne) && (torque > 0)) torque = 0;
+      if (deltaVect.dPitch !== (torque * loopTimeMs)) deltaVect.dPitch += torque * ELEVATOR_GAIN;
+    }
+    if (h_speed_mph) {
+      torque = 0.0;
+      if (rudder_pos !== 0) torque = -((h_speed_mph * rudder_pos) / 10000) * RUDDER_GAIN;
+      torque += calcTurnRate();
+      if (deltaVect.dYaw !== (torque * loopTimeMs)) deltaVect.dYaw += torque * 1.5;
+    }
+
+    // Hard caps on angular deltas (deg per simulation step) to prevent runaway rates
+    // in the discrete-time port.
+    deltaVect.dRoll  = clamp(deltaVect.dRoll,  -1.2, 1.2);
+    deltaVect.dPitch = clamp(deltaVect.dPitch, -1.0, 1.0);
+    deltaVect.dYaw   = clamp(deltaVect.dYaw,   -1.2, 1.2);
+  }
+
+  function applyRots() {
+    roll += deltaVect.dRoll;
+    yaw += deltaVect.dYaw;
+    pitch += (deltaVect.dPitch * Math.cos(rads(roll)));
+    yaw += -(deltaVect.dPitch * Math.sin(rads(roll)));
+
+    // bounds roll/yaw to [-180..180]
+    if (roll > 180) roll = -180 + (roll - 180);
+    else if (roll < -180) roll = 180 + (roll + 180);
+    if (yaw > 180) yaw = -180 + (yaw - 180);
+    else if (yaw < -180) yaw = 180 + (yaw + 180);
+
+    // special case pitch past vertical
+    if ((pitch > 90) || (pitch < -90)) {
+      if (roll >= 0) roll -= 180;
+      else roll += 180;
+      if (yaw >= 0) yaw -= 180;
+      else yaw += 180;
+      if (pitch > 0) pitch = (180 - pitch);
+      else pitch = (-180 - pitch);
+    }
+
+    // damp close to zero
+    if ((pitch > -0.5) && (pitch < 0.5)) pitch = 0;
+    if ((roll > -0.5) && (roll < 0.5)) roll = 0;
+    if ((yaw > -0.5) && (yaw < 0.5)) yaw = 0;
+  }
+
+  function integratePosition(loopTimeMs) {
+    // Port the simplified rotation path in RunFModel (roll rotation omitted in v2.1).
+    const tmpZ = delta_z_ft;
+
+    // Rotate in X by effective angle of flight
+    const newY_ft = -(tmpZ * Math.sin(efAOF_rad));
+    const newZ_ft = (tmpZ * Math.cos(efAOF_rad));
+
+    // Rotate in Y by yaw
+    const yawRad = rads(yaw);
+    const dX_ft = (newZ_ft * Math.sin(yawRad));
+    const dFwd_ft = (newZ_ft * Math.cos(yawRad));
+
+    // Apply to metric positions. Signs follow the C++ convention (x_pos -=, z_pos +=).
+    PX -= dX_ft * FT_TO_M;
+    PY += dFwd_ft * FT_TO_M;
+    PZ += newY_ft * FT_TO_M;
+
+    // Update heading for UI
+    AD = wrap360(yaw < 0 ? yaw + 360 : yaw);
+
+    // Airborne flag (simple): becomes airborne once altitude > 0
+    if ((!airborne) && (PZ > 0)) airborne = true;
+  }
+
+  function stepPhysics(dt) {
+    const loopTimeMs = Math.max(1, dt * 1000);
+
+    // C++ ordering: power/flight dynamics, damping, ROC, apply rotations, integrate.
+    calcPowerDyn(loopTimeMs);
+    calcFlightDyn(loopTimeMs);
+    inertialDamp();
+    calcROC(loopTimeMs);
+    applyRots();
+    integratePosition(loopTimeMs);
+
+    // Derive velocities for wind + instruments from current state
+    const speedMps = Math.max(0, h_speed_mph * MPH_TO_MPS);
+    const ra = AD * C;
+    VX = speedMps * Math.sin(ra);
+    VY = speedMps * Math.cos(ra);
+    VZ = v_speed_ft * FT_TO_M / dt; // ft/loop -> m/s (approx; avoids re-deriving from efAOF)
+
+    GX = VX + WX;
+    GY = VY + WY;
+    GZ = VZ;
+
+    // Integrate wind drift using metric velocities (keeps old UI behavior).
+    // Note: primary position integration already happened via C++ model (still-air).
+    PX += WX * dt;
+    PY += WY * dt;
+
+    // Ground contact => finish
+    if (PZ <= 0) {
+      PZ = 0;
+      finishLanding();
+    }
+  }
+
+  function finishLanding() {
+    keysDown.clear();
+    running = false;
+    ended = true;
+
+    // Distance to runway origin (meters). This keeps DRIFT and DISTANCE consistent:
+    // DISTANCE is always >= |DRIFT|.
+    const dist = Math.sqrt(PX*PX + PY*PY);
+    const vvMps = Math.max(0, h_speed_mph * MPH_TO_MPS);
+
+    // Reuse original scoring thresholds (tuned for the landing mini-game).
+    if (Math.abs(roll) > RT || pitch > TP || pitch < 0 || vvMps > 80) {
+      endMessage = [
+        "LAMENTAMOS INFORMAR QUE O VOO PJ26 SOFREU UM GRAVE ACIDENTE.",
+        "NAO HA SOBREVIVENTES."
+      ];
+    } else if (Math.abs(PX) > WR || Math.abs(PY) > 1000) {
+      if (vvMps < 40) endMessage = ["VOCE POUSOU FORA DA PISTA.", "COMO SUA VELOCIDADE ERA BAIXA,",
+        " QUASE NADA ACONTECEU."];
+      else if (vvMps < 80) endMessage = ["VOCE POUSOU FORA DA PISTA.", "ENTRE MORTOS E FERIDOS,",
+        " SALVARAM-SE TODOS."];
+      else endMessage = ["VOCE POUSOU FORA DA PISTA.", "NINGUEM SOBREVIVE A UM POUSO",
+        " NESTA VELOCIDADE."];
+    } else {
+      endMessage = ["PARABENS!", "ATERRISSAGEM BEM SUCEDIDA."];
+    }
+
+    endMessage.push("");
+    endMessage.push("VALORES RELATIVOS AO POUSO:");
+    endMessage.push(`VELOCIDADE DO AR = ${Math.floor(vvMps)} M/S`);
+    endMessage.push(`DISTANCIA        = ${Math.floor(dist)} M`);
+    endMessage.push(`INCLINACAO FRONTAL= ${Math.floor(pitch)}`);
+    endMessage.push(`INCLINACAO LATERAL= ${Math.floor(roll)}`);
+    endMessage.push(`ROTACAO DO MOTOR  = ${Math.floor(rpm)} RPM`);
+    endMessage.push(`DESVIO DA PISTA   = ${Math.floor(PX)} M`);
+    endMessage.push(`DIRECAO           = ${Math.floor(AD)} GRAUS`);
+    endMessage.push("");
+    endMessage.push("VOAR NOVAMENTE? (S/N)");
+  }
+
+  function computeRunwayBearingRB() {
+    if (!started) return 0;
+    if (PX === 0 && PY === 0) return 0;
+    const RB = Math.atan2(-PX, -PY) / C;
+    return wrap360(RB);
+  }
+
+  // --- TOP WINDOW ---
+  function drawWindowAndRunway() {
+    ctx.strokeStyle = "#fff";
+    ctx.lineWidth = 1;
+
+    line(10, 0, 245, 0);
+    line(245, 0, 245, 80);
+    line(245, 80, 10, 80);
+    line(10, 80, 10, 0);
+
+    // C++ model convention: pitch increases in the stall recovery by pitching "down".
+    // For UI consistency with the original landing sim, treat UI pitch as nose-up positive.
+    const uiPitch = -pitch;
+    let YC = 33 + uiPitch * 4;
+    let X3 = 16, X4 = 239;
+    let Y3 = YC + 118 * Math.tan(roll * 2 * C);
+    let Y4 = YC - 118 * Math.tan(roll * 2 * C);
+
+    const horizonClip = clipLineToRect(X3, Y3, X4, Y4, 16, 1, 223, 78);
+    if (horizonClip) line(horizonClip[0], horizonClip[1], horizonClip[2], horizonClip[3]);
+
+    if (!started) return;
+
+    const xmin = 16, xmax = 239, ymin = 1, ymax = 79;
+    const RB = computeRunwayBearingRB();
+
+    let WB = AD;
+    if (AD > 180) WB -= 360;
+    if (RB > 180) WB = WB + 360 - RB;
+    else WB = WB - RB;
+
+    const d = Math.sqrt((X3 - X4) ** 2 + (Y3 - Y4) ** 2);
+    if (!isFinite(d) || d === 0) return;
+    const AN = 118 / (60 * d);
+
+    let X7 = (X3 + X4) / 2 + sgn(X3 - X4) + WB * AN * (X3 - X4);
+    let Y7 = (Y3 + Y4) / 2 + 2 + WB * AN * (Y3 - Y4);
+
+    if (!isFinite(X7) || !isFinite(Y7)) return;
+    X7 = clamp(X7, xmin, xmax);
+    Y7 = clamp(Y7, ymin, ymax);
+
+    const pyAbs = Math.max(1, Math.abs(PY));
+    let R = (pyAbs < 1000) ? (8 - Y7 / 10) : (4000 / pyAbs);
+    R = clamp(R, 0.4, 8);
+
+    const theta = -roll * 2 * C;
+    const cs = Math.cos(theta), sn = Math.sin(theta);
+    function toScreen(lx, ly) { return [lx * cs - ly * sn + X7, lx * sn + ly * cs + Y7]; }
+
+    const R5 = 5 * R;
+    if (R < 1) {
+      const p1 = toScreen(0, -2), p2 = toScreen(0, 2);
+      const seg = clipLineToRect(p1[0], p1[1], p2[0], p2[1], xmin, ymin, xmax - xmin, ymax - ymin);
+      if (seg) line(seg[0], seg[1], seg[2], seg[3]);
+      return;
+    }
+
+    const yNear = clamp(2 * R5, 8, 140);
+    const farHalfW  = Math.max(1, 0.9 * R);
+    const nearHalfW = Math.max(2, 3.5 * R);
+
+    const FL = toScreen(-farHalfW, 0);
+    const FR = toScreen( farHalfW, 0);
+    const NR = toScreen( nearHalfW, yNear);
+    const NL = toScreen(-nearHalfW, yNear);
+
+    const clippedPoly = clipPolygonRect([FL, FR, NR, NL], xmin, xmax, ymin, ymax);
+    if (clippedPoly.length < 2) return;
+    drawPolygon(clippedPoly);
+
+    const dashStep = 5, dashLen = 2;
+    for (let ly = 2; ly < yNear; ly += dashStep) {
+      const p1 = toScreen(0, ly);
+      const p2 = toScreen(0, Math.min(yNear, ly + dashLen));
+      const seg = clipLineToRect(p1[0], p1[1], p2[0], p2[1], xmin, ymin, xmax - xmin, ymax - ymin);
+      if (seg) line(seg[0], seg[1], seg[2], seg[3]);
+    }
+  }
+
+  // --- INSTRUMENTS ---
+  function drawInstrumentsAndHUD() {
+    ctx.strokeStyle = "#fff";
+    ctx.lineWidth = 1;
+    ctx.fillStyle = "#fff";
+
+    const yDial = 128;
+    const dials = [
+      { cx: 35,  top: "AIRSPEED", bot: "BEARING"  },
+      { cx: 95,  top: "HORIZ",    bot: "RUNWAY"   },
+      { cx: 155, top: "ALTITUDE", bot: "DRIFT"    },
+      { cx: 215, top: "RPM",      bot: "DISTANCE" },
+    ];
+
+    for (const d of dials) circle(d.cx, yDial, 25);
+    for (const d of dials) {
+      for (let k = 0; k < 10; k++) {
+        const a = k * PI / 5;
+        line(d.cx + 21 * Math.sin(a), yDial - 21 * Math.cos(a),
+             d.cx + 19 * Math.sin(a), yDial - 19 * Math.cos(a));
+      }
+    }
+
+    const yTopLabel  = 95;
+    const yDialValue = 112;
+    const yBotLabel  = 168;
+    const yBotValue  = 180;
+
+    ctx.font = "10px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+    for (const d of dials) {
+      textCentered(d.cx, yTopLabel, d.top);
+      textCentered(d.cx, yBotLabel, d.bot);
+    }
+
+    const RB = started ? computeRunwayBearingRB() : 0;
+    // Distance to runway origin (meters)
+    const dist = started ? Math.sqrt(PX*PX + PY*PY) : 0;
+
+    const vvMps = Math.max(0, h_speed_mph * MPH_TO_MPS);
+
+    ctx.font = "11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+    textCentered(35,  yDialValue, `${Math.floor(vvMps)}`);
+    textCentered(155, yDialValue, `${Math.floor(PZ)}`);
+    textCentered(215, yDialValue, `${Math.floor(rpm)}`);
+
+    needle(35, yDial, 15, vvMps * PI / 200);
+
+    // Horizon dial
+    {
+      const cx = 95, cy = yDial;
+      const r = 18;
+      const theta = -roll * 2 * C;
+      const dx = Math.cos(theta), dy = Math.sin(theta);
+      const uiPitch = -pitch;
+      const x0 = cx, y0 = cy + uiPitch;
+
+      const fx = x0 - cx, fy = y0 - cy;
+      const b = 2 * (fx * dx + fy * dy);
+      const cc = (fx * fx + fy * fy) - r * r;
+      const disc = b * b - 4 * cc;
+      if (disc >= 0) {
+        const s = Math.sqrt(disc);
+        const t1 = (-b - s) / 2;
+        const t2 = (-b + s) / 2;
+        line(x0 + t1 * dx, y0 + t1 * dy, x0 + t2 * dx, y0 + t2 * dy);
+      }
+
+      let x = 81, y = yDial;
+      const segs = [[9,0],[5,5],[5,-5],[9,0]];
+      for (const [sx, sy] of segs) {
+        line(x, y, x + sx, y + sy);
+        x += sx; y += sy;
+      }
+    }
+
+    // Altitude needles (as in original)
+    const TN = started ? (PZ / 1000) : 0;
+    const UN = started ? (PZ - 1000 * Math.floor(TN)) : 0;
+    needle(155, yDial, 10, TN * PI / 5);
+    needle(155, yDial, 15, UN * PI / 500);
+
+    // RPM needle (scaled to 0..~9000 mapped to 0..5*PI)
+    needle(215, yDial, 15, clamp(rpm / 1800, 0, 5) * PI / 5);
+
+    ctx.font = "12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+    textCentered(35,  yBotValue, `${Math.floor(started ? AD : 0)}`);
+    textCentered(95,  yBotValue, `${Math.floor(RB)}`);
+    textCentered(155, yBotValue, `${Math.floor(started ? PX : 0)}`);
+    textCentered(215, yBotValue, `${Math.floor(dist)}`);
+  }
+
+  function drawEndScreen() {
+    ctx.fillStyle = "rgba(0,0,0,0.92)";
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#fff";
+    ctx.font = "10px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+    let y = 18;
+    for (const s of endMessage) {
+      if (s === "") { y += 6; continue; }
+      ctx.fillText(s, 10, y);
+      y += 12;
+      if (y > H - 10) break;
+    }
+  }
+
+  function render() {
+    clearScreen();
+    ctx.strokeStyle = "#fff";
+    ctx.fillStyle = "#fff";
+    drawWindowAndRunway();
+    drawInstrumentsAndHUD();
+    if (ended) drawEndScreen();
+  }
+
+  let last = performance.now();
+  let acc = 0;
+
+  function loop(now) {
+    const dtReal = (now - last) / 1000;
+    last = now;
+    acc += Math.min(dtReal, 0.25);
+
+    let steps = 0;
+    while (acc >= DT && steps < MAX_CATCHUP_STEPS) {
+      if (running && !ended) {
+        updateControls(DT);
+        stepPhysics(DT);
+      }
+      acc -= DT;
+      steps++;
+    }
+
+    render();
+    requestAnimationFrame(loop);
+  }
+
+  document.getElementById("startBtn").addEventListener("click", () => {
+    const ws = clamp(parseFloat(document.getElementById("windSpeed").value || "10"), 1, 50);
+    const wd = wrap360(parseFloat(document.getElementById("windDir").value || "0"));
+    started = true;
+    resetGame(ws, wd);
+  });
+
+  setDemoScreenState();
+  render();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
+
+
