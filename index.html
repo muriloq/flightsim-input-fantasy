@@ -13,7 +13,7 @@
     input { width:170px; padding:6px 8px; background:#050505; border:1px solid #777; border-radius:6px; color:#fff; }
     button { padding:8px 10px; border-radius:8px; border:1px solid #999; background:#111; color:#fff; cursor:pointer; }
     button:hover { background:#222; }
-    canvas { display:block; width:100%; height:auto; image-rendering: pixelated; background:#000; border:1px solid #fff; border-radius:4px; }
+    canvas { display:block; width:100%; aspect-ratio: 4 / 3; background:#000; border:1px solid #fff; border-radius:4px; }
     .row { display:flex; gap:12px; flex-wrap:wrap; align-items:end; }
     .hint { margin-top:8px; font-size:0.95rem; opacity:0.95; }
     .kbd { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; padding:1px 6px; border:1px solid #777; border-radius:6px; background:#111; }
@@ -51,10 +51,13 @@
 
 <script>
 (() => {
+  // Logical resolution (simulation/render layout coordinates).
+  // The canvas backing store is resized to match the window and this logical
+  // coordinate system is scaled to it.
   const W = 256, H = 192;
   const canvas = document.getElementById("screen");
   const ctx = canvas.getContext("2d", { alpha: false });
-  ctx.imageSmoothingEnabled = false;
+  ctx.imageSmoothingEnabled = true;
 
   const PI = Math.PI;
   const C = PI / 180;
@@ -75,6 +78,9 @@
   const AILERON_GAIN = 0.4;   // 2.0 / 5
   const ELEVATOR_GAIN = 0.75; // 1.5 / 2
   const RUDDER_GAIN = 0.35;   // reduce yaw authority from rudder (Z/C)
+  // Rendering-only scaling to make the visible pitch attitude a bit less aggressive.
+  // (Does not affect the underlying flight model.)
+  const PITCH_RENDER_SCALE = 0.85;
 
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
   const wrap360 = (deg) => {
@@ -85,22 +91,78 @@
   const sgn = (x) => (x < 0 ? -1 : x > 0 ? 1 : 0);
   const rnd = (x) => Math.round(x);
 
+  // Canvas backing-store resize (resolution independent rendering)
+  let _scaleX = 1, _scaleY = 1, _pxScale = 1;
+  function resizeCanvasToWindowIfNeeded() {
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    const cssW = Math.max(1, rect.width);
+    const cssH = Math.max(1, rect.height);
+    const newW = Math.max(1, Math.round(cssW * dpr));
+    const newH = Math.max(1, Math.round(cssH * dpr));
+    if (canvas.width === newW && canvas.height === newH) return;
+    canvas.width = newW;
+    canvas.height = newH;
+    _scaleX = newW / W;
+    _scaleY = newH / H;
+    _pxScale = (_scaleX + _scaleY) * 0.5;
+    ctx.setTransform(_scaleX, 0, 0, _scaleY, 0, 0);
+    ctx.lineCap = "butt";
+    ctx.lineJoin = "miter";
+  }
+  window.addEventListener("resize", () => resizeCanvasToWindowIfNeeded());
+
   function clearScreen() {
+    resizeCanvasToWindowIfNeeded();
     ctx.fillStyle = "#000";
     ctx.fillRect(0, 0, W, H);
   }
+  function _snapToDevicePixelCenterX(x) {
+    // Convert to device pixels, snap to pixel center, convert back to logical coords.
+    return (Math.round(x * _scaleX) + 0.5) / _scaleX;
+  }
+  function _snapToDevicePixelCenterY(y) {
+    return (Math.round(y * _scaleY) + 0.5) / _scaleY;
+  }
   function line(x1, y1, x2, y2) {
-    x1 = rnd(x1); y1 = rnd(y1);
-    x2 = rnd(x2); y2 = rnd(y2);
+    // Keep strokes 1 device pixel wide regardless of canvas scaling.
+    ctx.lineWidth = 1 / _pxScale;
     ctx.beginPath();
-    ctx.moveTo(x1 + 0.5, y1 + 0.5);
-    ctx.lineTo(x2 + 0.5, y2 + 0.5);
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
     ctx.stroke();
   }
+  function lineSnapped(x1, y1, x2, y2) {
+    // Snap endpoints to device-pixel centers to avoid shimmering/flicker with anti-aliasing.
+    x1 = _snapToDevicePixelCenterX(x1);
+    x2 = _snapToDevicePixelCenterX(x2);
+    y1 = _snapToDevicePixelCenterY(y1);
+    y2 = _snapToDevicePixelCenterY(y2);
+    line(x1, y1, x2, y2);
+  }
+  function dotSnapped(x, y) {
+    // Draw a single device pixel at (x,y) in logical coordinates.
+    const px = Math.round(x * _scaleX);
+    const py = Math.round(y * _scaleY);
+    ctx.fillRect(px / _scaleX, py / _scaleY, 1 / _scaleX, 1 / _scaleY);
+  }
+  function dotSoft(x, y) {
+    // Draw ~1 device-pixel dot but do NOT snap to pixel centers (reduces moiré patterns).
+    const w = 1 / _scaleX;
+    const h = 1 / _scaleY;
+    ctx.fillRect(x - w * 0.5, y - h * 0.5, w, h);
+  }
+  function dotSoftPx(x, y, pxSize) {
+    // Draw a pxSize x pxSize dot in *device pixels* (converted to logical coords),
+    // without snapping to pixel centers.
+    const w = pxSize / _scaleX;
+    const h = pxSize / _scaleY;
+    ctx.fillRect(x - w * 0.5, y - h * 0.5, w, h);
+  }
   function circle(cx, cy, r) {
-    cx = rnd(cx); cy = rnd(cy);
+    ctx.lineWidth = 1 / _pxScale;
     ctx.beginPath();
-    ctx.arc(cx + 0.5, cy + 0.5, r, 0, Math.PI * 2);
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
     ctx.stroke();
   }
   function needle(cx, cy, len, aRad) {
@@ -110,7 +172,7 @@
   }
   function textCentered(cx, y, s) {
     const w = ctx.measureText(s).width;
-    ctx.fillText(s, rnd(cx - w / 2), rnd(y));
+    ctx.fillText(s, cx - w / 2, y);
   }
 
   // Liang–Barsky line clipping
@@ -269,7 +331,10 @@
   }
 
   function projectCamToScreen(pCam, intr) {
-    if (pCam.z <= intr.nearZ) return null;
+    // Accept points exactly on the near plane (z == nearZ). Polygons/segments are
+    // clipped to nearZ, and rejecting equality can cause geometry to disappear
+    // at low altitude/pitch when many points land exactly on the plane.
+    if (pCam.z < intr.nearZ) return null;
     const x = intr.cx + intr.f * (pCam.x / pCam.z);
     const y = intr.cy + intr.f * (pCam.y / pCam.z);
     if (!isFinite(x) || !isFinite(y)) return null;
@@ -435,7 +500,7 @@
     // Start position (metric)
     PX = 0;
     PY = -10000;
-    PZ = 1500;
+    PZ = 750;
 
     // Start attitude
     roll = 0;
@@ -695,8 +760,11 @@
     const dX_ft = (newZ_ft * Math.sin(yawRad));
     const dFwd_ft = (newZ_ft * Math.cos(yawRad));
 
-    // Apply to metric positions. Signs follow the C++ convention (x_pos -=, z_pos +=).
-    PX -= dX_ft * FT_TO_M;
+    // Apply to metric positions.
+    // Convention used everywhere else in this HTML port (HUD/camera):
+    // 0° = +Y, 90° = +X, 180° = -Y, 270° = -X.
+    // So positive yaw increases +X.
+    PX += dX_ft * FT_TO_M;
     PY += dFwd_ft * FT_TO_M;
     PZ += newY_ft * FT_TO_M;
 
@@ -752,6 +820,10 @@
     const dyr = PY - RUNWAY_REF_Y;
     const dist = Math.sqrt(dxr*dxr + dyr*dyr);
     const vvMps = Math.max(0, h_speed_mph * MPH_TO_MPS);
+    const onRunway =
+      (Math.abs(PX) <= WR) &&
+      (PY >= RUNWAY_START_Y) &&
+      (PY <= RUNWAY_END_Y);
 
     // Reuse original scoring thresholds (tuned for the landing mini-game).
     if (Math.abs(roll) > RT || pitch > TP || pitch < 0 || vvMps > 80) {
@@ -759,7 +831,7 @@
         "LAMENTAMOS INFORMAR QUE O VOO PJ26 SOFREU UM GRAVE ACIDENTE.",
         "NAO HA SOBREVIVENTES."
       ];
-    } else if (Math.abs(PX) > WR || Math.abs(PY) > 1000) {
+    } else if (!onRunway) {
       if (vvMps < 40) endMessage = ["VOCE POUSOU FORA DA PISTA.", "COMO SUA VELOCIDADE ERA BAIXA,",
         " QUASE NADA ACONTECEU."];
       else if (vvMps < 80) endMessage = ["VOCE POUSOU FORA DA PISTA.", "ENTRE MORTOS E FERIDOS,",
@@ -817,7 +889,7 @@
     // Camera pose: use aircraft position and attitude.
     // Model convention: pitch increases when pitching down, so invert to get "nose up".
     const camPos = v3(PX, PY, PZ);
-    const basis = computeCameraBasis(AD, -pitch, roll);
+    const basis = computeCameraBasis(AD, -pitch * PITCH_RENDER_SCALE, roll);
 
     // Near plane: keep small. A large nearZ (like 1m) can slice the runway when low,
     // producing unstable polygons. We keep it small but non-zero to avoid blowups.
@@ -841,8 +913,10 @@
 
     if (!started) return;
 
-    // --- Ground grid (500m spacing) on Z=0 ---
-    ctx.strokeStyle = "#666";
+    // --- Ground grid as dots at intersections (500m spacing) on Z=0 ---
+    ctx.save();
+    ctx.fillStyle = "#9aa";
+    ctx.globalAlpha = 0.55;
     const GRID = 500;
 
     function screenRayDirWorld(x, y) {
@@ -880,9 +954,11 @@
       [xmax, ymax],
     ];
     let farDist = 0;
+    const groundHits = [];
     for (const [sx, sy] of samplePts) {
       const hit = intersectRayWithGroundZ0(screenRayDirWorld(sx, sy));
       if (!hit) continue;
+      groundHits.push(hit);
       const d = Math.hypot(hit.x - PX, hit.y - PY);
       if (isFinite(d) && d > farDist) farDist = d;
     }
@@ -893,11 +969,42 @@
     const distToRunway = Math.hypot(PX, PY);
     const RANGE = Math.max(farDist, 2 * distToRunway);
 
-    const x0 = Math.floor((PX - RANGE) / GRID) * GRID;
-    const x1 = Math.ceil((PX + RANGE) / GRID) * GRID;
-    const y0 = Math.floor((PY - RANGE) / GRID) * GRID;
-    const y1 = Math.ceil((PY + RANGE) / GRID) * GRID;
+    // Prefer bounding box of actually visible ground hits to keep point count reasonable.
+    let minGX = PX - RANGE, maxGX = PX + RANGE, minGY = PY - RANGE, maxGY = PY + RANGE;
+    if (groundHits.length >= 2) {
+      minGX = Math.min(...groundHits.map(p => p.x));
+      maxGX = Math.max(...groundHits.map(p => p.x));
+      minGY = Math.min(...groundHits.map(p => p.y));
+      maxGY = Math.max(...groundHits.map(p => p.y));
+      // Expand a bit so we don't get holes at the edges due to rounding/clipping.
+      minGX -= GRID; maxGX += GRID;
+      minGY -= GRID; maxGY += GRID;
+    }
+    // Always include a local region around the aircraft so dots appear close-by
+    // and to the sides, regardless of the far/horizon sampling.
+    const LOCAL_X = 4000;
+    const LOCAL_Y_BACK = 1000;
+    const LOCAL_Y_FWD = 8000;
+    minGX = Math.min(minGX, PX - LOCAL_X);
+    maxGX = Math.max(maxGX, PX + LOCAL_X);
+    minGY = Math.min(minGY, PY - LOCAL_Y_BACK);
+    maxGY = Math.max(maxGY, PY + LOCAL_Y_FWD);
 
+    const x0 = Math.floor(minGX / GRID) * GRID;
+    const x1 = Math.ceil(maxGX / GRID) * GRID;
+    const y0 = Math.floor(minGY / GRID) * GRID;
+    const y1 = Math.ceil(maxGY / GRID) * GRID;
+
+    function drawWorldDot(wx, wy) {
+      const pc = worldToCamera(v3(wx, wy, 0), camPos, basis);
+      if (pc.z < intr.nearZ) return;
+      const s = projectCamToScreen(pc, intr);
+      if (!s) return;
+      if (s[0] < xmin || s[0] > xmax || s[1] < ymin || s[1] > ymax) return;
+      dotSoft(s[0], s[1]);
+    }
+
+    // Draw a projected world-space segment (used for runway centerline dashes).
     function drawWorldSegment(pw1, pw2) {
       let p1c = worldToCamera(pw1, camPos, basis);
       let p2c = worldToCamera(pw2, camPos, basis);
@@ -908,15 +1015,35 @@
       const s2 = projectCamToScreen(p2c, intr);
       if (!s1 || !s2) return;
       const seg = clipLineToRect(s1[0], s1[1], s2[0], s2[1], xmin, ymin, vw, vh);
-      if (seg) line(seg[0], seg[1], seg[2], seg[3]);
+      if (seg) lineSnapped(seg[0], seg[1], seg[2], seg[3]);
     }
 
-    for (let y = y0; y <= y1; y += GRID) {
-      drawWorldSegment(v3(x0, y, 0), v3(x1, y, 0));
+    // Budget dots per frame to avoid huge loops at high altitude / far horizon.
+    const nx = Math.max(1, Math.floor((x1 - x0) / GRID) + 1);
+    const ny = Math.max(1, Math.floor((y1 - y0) / GRID) + 1);
+    // Higher target => denser dots (less skipping).
+    const targetDots = 80000;
+    const stride = Math.max(1, Math.ceil(Math.sqrt((nx * ny) / targetDots)));
+    const step = GRID * stride;
+
+    // Draw a dense local patch first (no skipping), so dots show up near the aircraft.
+    const lx0 = Math.floor((PX - LOCAL_X) / GRID) * GRID;
+    const lx1 = Math.ceil((PX + LOCAL_X) / GRID) * GRID;
+    const ly0 = Math.floor((PY - LOCAL_Y_BACK) / GRID) * GRID;
+    const ly1 = Math.ceil((PY + LOCAL_Y_FWD) / GRID) * GRID;
+    for (let y = ly0; y <= ly1; y += GRID) {
+      for (let x = lx0; x <= lx1; x += GRID) {
+        drawWorldDot(x, y);
+      }
     }
-    for (let x = x0; x <= x1; x += GRID) {
-      drawWorldSegment(v3(x, y0, 0), v3(x, y1, 0));
+
+    // Then draw the far/horizon region with a stride (skipping) for performance.
+    for (let y = y0; y <= y1; y += step) {
+      for (let x = x0; x <= x1; x += step) {
+        drawWorldDot(x, y);
+      }
     }
+    ctx.restore();
 
     // --- Runway as a true world rectangle on Z=0 ---
     // The landing game measures distance to the runway touchdown point at (0,0).
@@ -949,6 +1076,29 @@
         ctx.closePath();
         ctx.fill();
 
+        // Add dense dots on the runway surface so it stays readable up close.
+        // (World-space lattice projected into screen space.)
+        ctx.save();
+        ctx.fillStyle = "#cfcfcf";
+        ctx.globalAlpha = 0.85;
+        const RUNWAY_DOT_STEP_X = 10; // meters across runway width
+        const RUNWAY_DOT_STEP_Y = 20; // meters along runway length
+        const RUNWAY_DOT_PX = 2;      // device pixels
+        function drawRunwayDot(wx, wy) {
+          const pc = worldToCamera(v3(wx, wy, 0), camPos, basis);
+          if (pc.z < intr.nearZ) return;
+          const s = projectCamToScreen(pc, intr);
+          if (!s) return;
+          if (s[0] < xmin || s[0] > xmax || s[1] < ymin || s[1] > ymax) return;
+          dotSoftPx(s[0], s[1], RUNWAY_DOT_PX);
+        }
+        for (let yy = RUNWAY_START_Y; yy <= RUNWAY_END_Y; yy += RUNWAY_DOT_STEP_Y) {
+          for (let xx = -rw; xx <= rw; xx += RUNWAY_DOT_STEP_X) {
+            drawRunwayDot(xx, yy);
+          }
+        }
+        ctx.restore();
+
         // Outline runway.
         ctx.strokeStyle = "#fff";
         drawPolygon(runwayPoly);
@@ -972,25 +1122,33 @@
     ctx.fillStyle = "#fff";
 
     const yDial = 128;
+    const dialR = 22; // reduced to make space for the new variometer
+    const cxAirspeed = 28;
+    const cxHorizon  = 76;
+    const cxAltitude = 124;
+    const cxVario    = 172;
+    const cxRpm      = 220;
+
     const dials = [
-      { cx: 35,  top: "AIRSPEED", bot: "BEARING"  },
-      { cx: 95,  top: "HORIZ",    bot: "RUNWAY"   },
-      { cx: 155, top: "ALTITUDE", bot: "DRIFT"    },
-      { cx: 215, top: "RPM",      bot: "DISTANCE" },
+      { cx: cxAirspeed, top: "AIRSPEED",  bot: "BEARING"  },
+      { cx: cxHorizon,  top: "HORIZ",     bot: "RUNWAY"   },
+      { cx: cxAltitude, top: "ALTITUDE",  bot: "DRIFT"    },
+      { cx: cxVario,    top: "VARIO",     bot: ""         },
+      { cx: cxRpm,      top: "RPM",       bot: "DIST"     },
     ];
 
-    for (const d of dials) circle(d.cx, yDial, 25);
+    for (const d of dials) circle(d.cx, yDial, dialR);
     for (const d of dials) {
       for (let k = 0; k < 10; k++) {
         const a = k * PI / 5;
-        line(d.cx + 21 * Math.sin(a), yDial - 21 * Math.cos(a),
-             d.cx + 19 * Math.sin(a), yDial - 19 * Math.cos(a));
+        line(d.cx + (dialR - 1) * Math.sin(a), yDial - (dialR - 1) * Math.cos(a),
+             d.cx + (dialR - 3) * Math.sin(a), yDial - (dialR - 3) * Math.cos(a));
       }
     }
 
-    const yTopLabel  = 95;
+    const yTopLabel  = 96;
     const yDialValue = 112;
-    const yBotLabel  = 168;
+    const yBotLabel  = 166;
     const yBotValue  = 180;
 
     ctx.font = "10px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
@@ -1004,21 +1162,27 @@
     const dist = started ? Math.sqrt(PX*PX + (PY - RUNWAY_REF_Y)*(PY - RUNWAY_REF_Y)) : 0;
 
     const vvMps = Math.max(0, h_speed_mph * MPH_TO_MPS);
+    const vsMps = started ? (v_speed_ft * FT_TO_M / DT) : 0; // m/s (vertical)
 
     ctx.font = "11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
-    textCentered(35,  yDialValue, `${Math.floor(vvMps)}`);
-    textCentered(155, yDialValue, `${Math.floor(PZ)}`);
-    textCentered(215, yDialValue, `${Math.floor(rpm)}`);
+    textCentered(cxAirspeed, yDialValue, `${Math.floor(vvMps)}`);
+    textCentered(cxAltitude, yDialValue, `${Math.floor(PZ)}`);
+    {
+      const v = Math.round(vsMps);
+      const s = v > 0 ? `+${v}` : `${v}`;
+      textCentered(cxVario, yDialValue, s);
+    }
+    textCentered(cxRpm,      yDialValue, `${Math.floor(rpm)}`);
 
-    needle(35, yDial, 15, vvMps * PI / 200);
+    needle(cxAirspeed, yDial, 14, vvMps * PI / 200);
 
     // Horizon dial
     {
-      const cx = 95, cy = yDial;
-      const r = 18;
+      const cx = cxHorizon, cy = yDial;
+      const r = dialR - 4;
       const theta = -roll * 2 * C;
       const dx = Math.cos(theta), dy = Math.sin(theta);
-      const uiPitch = -pitch;
+      const uiPitch = -pitch * PITCH_RENDER_SCALE;
       const x0 = cx, y0 = cy + uiPitch;
 
       const fx = x0 - cx, fy = y0 - cy;
@@ -1032,7 +1196,7 @@
         line(x0 + t1 * dx, y0 + t1 * dy, x0 + t2 * dx, y0 + t2 * dy);
       }
 
-      let x = 81, y = yDial;
+      let x = cx - 14, y = yDial;
       const segs = [[9,0],[5,5],[5,-5],[9,0]];
       for (const [sx, sy] of segs) {
         line(x, y, x + sx, y + sy);
@@ -1043,17 +1207,39 @@
     // Altitude needles (as in original)
     const TN = started ? (PZ / 1000) : 0;
     const UN = started ? (PZ - 1000 * Math.floor(TN)) : 0;
-    needle(155, yDial, 10, TN * PI / 5);
-    needle(155, yDial, 15, UN * PI / 500);
+    needle(cxAltitude, yDial, 9,  TN * PI / 5);
+    needle(cxAltitude, yDial, 14, UN * PI / 500);
+
+    // Variometer (vertical speed indicator)
+    {
+      const cx = cxVario, cy = yDial;
+      const r = dialR - 3;
+
+      // Face text (keep simple; units match sim: m/s).
+      ctx.font = "7px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+      //textCentered(cx, cy - 3, "VERTICAL SPEED");
+      // textCentered(cx, cy + 9, "M/S");
+      // ctx.font = "8px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+      // ctx.fillText("UP", cx - r + 2, cy - 2);
+      // ctx.fillText("DN", cx - r + 2, cy + 10);
+
+      // Needle: 0 points left. Positive climbs rotate over the top; negative over the bottom.
+      const VARIO_MAX_MPS = 10.0; // full scale corresponds to ~2000 fpm
+      const frac = clamp(Math.abs(vsMps) / VARIO_MAX_MPS, 0, 1);
+      const base = -PI / 2;
+      const ang = vsMps >= 0 ? (base + frac * PI) : (base - frac * PI);
+      ctx.font = "11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+      needle(cx, cy, 14, ang);
+    }
 
     // RPM needle (scaled to 0..~9000 mapped to 0..5*PI)
-    needle(215, yDial, 15, clamp(rpm / 1800, 0, 5) * PI / 5);
+    needle(cxRpm, yDial, 14, clamp(rpm / 1800, 0, 5) * PI / 5);
 
     ctx.font = "12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
-    textCentered(35,  yBotValue, `${Math.floor(started ? AD : 0)}`);
-    textCentered(95,  yBotValue, `${Math.floor(RB)}`);
-    textCentered(155, yBotValue, `${Math.floor(started ? PX : 0)}`);
-    textCentered(215, yBotValue, `${Math.floor(dist)}`);
+    textCentered(cxAirspeed, yBotValue, `${Math.floor(started ? AD : 0)}`);
+    textCentered(cxHorizon,  yBotValue, `${Math.floor(RB)}`);
+    textCentered(cxAltitude, yBotValue, `${Math.floor(started ? PX : 0)}`);
+    textCentered(cxRpm,      yBotValue, `${Math.floor(dist)}`);
   }
 
   function drawEndScreen() {
