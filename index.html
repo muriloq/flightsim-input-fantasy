@@ -99,6 +99,11 @@
     if (deg < 0) deg += 360;
     return deg;
   };
+  const wrap180 = (deg) => {
+    deg = wrap360(deg);
+    if (deg > 180) deg -= 360;
+    return deg;
+  };
   const sgn = (x) => (x < 0 ? -1 : x > 0 ? 1 : 0);
   const rnd = (x) => Math.round(x);
 
@@ -1270,6 +1275,56 @@
     const RB = started ? computeRunwayBearingRB() : 0;
     // Distance to runway reference point (meters)
     const dist = started ? Math.sqrt(PX*PX + (PY - RUNWAY_REF_Y)*(PY - RUNWAY_REF_Y)) : 0;
+
+    // VOR-like CDI (runway "station"): place just above the RUNWAY digital readout.
+    // Minimal: box, dots, needle, TO/FROM triangle (no text inside).
+    {
+      const cx = cxHorizon;
+      const cy = yBotLabel - 8;
+      const w = 30;
+      const h = 10;
+
+      // Frame
+      ctx.strokeRect(cx - w / 2, cy - h / 2, w, h);
+
+      // Selected course (OBS). Fixed to inbound runway course (0° = +Y).
+      const OBS = 0;
+      const d = wrap180(RB - OBS);
+
+      // CDI deflection scale (game-friendly): ±10° full-scale.
+      const FULL_SCALE_DEG = 10;
+      const def = clamp(d / FULL_SCALE_DEG, -1, 1);
+      const x = cx + def * (w * 0.35);
+
+      // Center line
+      line(cx, cy - h * 0.35, cx, cy + h * 0.35);
+
+      // Dots
+      for (const k of [-2, -1, 1, 2]) {
+        const dx = k * (w * 0.14);
+        ctx.beginPath();
+        ctx.arc(cx + dx, cy, 1, 0, 2 * PI);
+        ctx.fill();
+      }
+
+      // Needle
+      line(x, cy - h * 0.45, x, cy + h * 0.45);
+
+      // TO/FROM triangle
+      const to = Math.cos(d * C) >= 0;
+      ctx.beginPath();
+      if (to) {
+        ctx.moveTo(cx, cy - h * 0.6);
+        ctx.lineTo(cx - 3, cy - h * 0.3);
+        ctx.lineTo(cx + 3, cy - h * 0.3);
+      } else {
+        ctx.moveTo(cx, cy + h * 0.6);
+        ctx.lineTo(cx - 3, cy + h * 0.3);
+        ctx.lineTo(cx + 3, cy + h * 0.3);
+      }
+      ctx.closePath();
+      ctx.fill();
+    }
 
     const vvMps = Math.max(0, h_speed_mph * MPH_TO_MPS);
     const vvKmh = vvMps * MPS_TO_KMH;
