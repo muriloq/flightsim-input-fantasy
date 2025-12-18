@@ -1160,7 +1160,7 @@
     ctx.fillStyle = "#fff";
 
     const yDial = 128;
-    const dialR = 20; // slightly smaller so we can fit the TURN coordinator below VARIO
+    const dialR = 16; // match TURN coordinator diameter
     const cxAirspeed = 28;
     const cxHorizon  = 76;
     const cxAltitude = 124;
@@ -1293,6 +1293,7 @@
       const cx = cxVario;
       const cy = 170;
       const r = 16;
+      const PLANE_SCALE = 0.8; // make wings 20% smaller
 
       // Label (outside dial, to avoid clutter).
       ctx.font = FONT_LABEL;
@@ -1318,11 +1319,11 @@
       ctx.translate(cx, cy);
       ctx.rotate(bankNeedleRad);
       // wings
-      line(-r * 0.85, 0, r * 0.85, 0);
+      line(-r * 0.85 * PLANE_SCALE, 0, r * 0.85 * PLANE_SCALE, 0);
       // fuselage
-      line(0, -r * 0.15, 0, r * 0.35);
+      line(0, -r * 0.15 * PLANE_SCALE, 0, r * 0.35 * PLANE_SCALE);
       // tail
-      line(-r * 0.20, r * 0.20, r * 0.20, r * 0.20);
+      line(-r * 0.20 * PLANE_SCALE, r * 0.20 * PLANE_SCALE, r * 0.20 * PLANE_SCALE, r * 0.20 * PLANE_SCALE);
       ctx.restore();
 
       // Slip/skid "ball" (approx):
@@ -1341,7 +1342,7 @@
 
       const ballX = cx + clamp(slipDps / 3.0, -1, 1) * trackHalf;
       ctx.beginPath();
-      ctx.arc(ballX, trackY, 3, 0, 2 * PI);
+      ctx.arc(ballX, trackY, 3 * 0.8, 0, 2 * PI);
       ctx.fill();
     }
 
