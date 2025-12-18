@@ -80,6 +80,7 @@
   const CTRL_EFF_SPEED_MPH_MIN = 60; // ~97 km/h
   const randSigned = () => (Math.random() * 2 - 1);
   const randMul = (pct) => 1 + randSigned() * pct;
+  const G_MPS2 = 9.80665;
 
   // --- Control effectiveness tuning (ported model was tuned for a different sim/context) ---
   // Lower values = slower response.
@@ -1159,7 +1160,7 @@
     ctx.fillStyle = "#fff";
 
     const yDial = 128;
-    const dialR = 22; // reduced to make space for the new variometer
+    const dialR = 20; // slightly smaller so we can fit the TURN coordinator below VARIO
     const cxAirspeed = 28;
     const cxHorizon  = 76;
     const cxAltitude = 124;
@@ -1285,6 +1286,63 @@
       const ang = vsNeedleMps >= 0 ? (base + frac * PI) : (base - frac * PI);
       ctx.font = FONT_VALUE;
       needle(cx, cy, 14, ang);
+    }
+
+    // Turn coordinator (minimalist): below VARIO.
+    {
+      const cx = cxVario;
+      const cy = 170;
+      const r = 16;
+
+      // Label (outside dial, to avoid clutter).
+      ctx.font = FONT_LABEL;
+      textCentered(cx, cy - r - 4, "TURN");
+
+      circle(cx, cy, r);
+
+      // Reference marks (L/R standard rate).
+      const m = r - 2;
+      line(cx - m, cy, cx - m + 5, cy);
+      line(cx + m, cy, cx + m - 5, cy);
+
+      // Compute yaw rate (deg/s) from per-step delta.
+      const yawRateDps = deltaVect.dYaw * SIM_HZ;
+
+      // Standard rate turn (2 min) is ~3 deg/s.
+      const stdRateDps = 3.0;
+      const bankNeedleDeg = clamp(yawRateDps / stdRateDps, -1, 1) * 25;
+      const bankNeedleRad = bankNeedleDeg * C;
+
+      // Draw "airplane": wings + small fuselage. Rotate by turn indication.
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(bankNeedleRad);
+      // wings
+      line(-r * 0.85, 0, r * 0.85, 0);
+      // fuselage
+      line(0, -r * 0.15, 0, r * 0.35);
+      // tail
+      line(-r * 0.20, r * 0.20, r * 0.20, r * 0.20);
+      ctx.restore();
+
+      // Slip/skid "ball" (approx):
+      // Compare actual yaw rate to coordinated-turn yaw rate from bank and speed.
+      const speedMps = Math.max(1, h_speed_mph * MPH_TO_MPS);
+      const bankRad = roll * C;
+      const expectedYawDps = (G_MPS2 * Math.tan(bankRad) / speedMps) * (180 / PI);
+      const slipDps = yawRateDps - expectedYawDps;
+
+      // Ball track at bottom of dial.
+      const trackY = cy + r * 0.55;
+      const trackHalf = r * 0.55;
+      // Center marks.
+      line(cx - r * 0.10, trackY - 3, cx - r * 0.10, trackY + 3);
+      line(cx + r * 0.10, trackY - 3, cx + r * 0.10, trackY + 3);
+
+      const ballX = cx + clamp(slipDps / 3.0, -1, 1) * trackHalf;
+      ctx.beginPath();
+      ctx.arc(ballX, trackY, 3, 0, 2 * PI);
+      ctx.fill();
     }
 
     // RPM needle (scaled to 0..~9000 mapped to 0..5*PI)
