@@ -1213,8 +1213,9 @@
     // Driven by current direction/heading value (AD). Keep minimalist and keep the digital value.
     {
       const cx = cxAirspeed;
-      const cy = yBotUnit;
-      const r = 10;
+      // Move it up a bit (no BEARING label anymore) and match the other dial sizes.
+      const cy = yBotLabel + 4;
+      const r = dialR;
 
       circle(cx, cy, r);
 
@@ -1248,9 +1249,15 @@
       }
       ctx.restore();
 
-      // Fixed reference (aircraft): center cross.
-      line(cx - 2, cy, cx + 2, cy);
-      line(cx, cy - 4, cx, cy + 4);
+      // Fixed reference (aircraft): simplified airplane.
+      const w = r * 0.55;
+      const h = r * 0.35;
+      // wings
+      line(cx - w, cy, cx + w, cy);
+      // fuselage
+      line(cx, cy - h, cx, cy + h);
+      // tail
+      line(cx - r * 0.18, cy + h * 0.5, cx + r * 0.18, cy + h * 0.5);
     }
 
     const RB = started ? computeRunwayBearingRB() : 0;
