@@ -71,6 +71,7 @@
   const M_TO_FT = 1 / FT_TO_M;
   const MPH_TO_MPS = 0.44704;
   const MPS_TO_MPH = 1 / MPH_TO_MPS;
+  const MPS_TO_KMH = 3.6;
 
   // --- Control effectiveness tuning (ported model was tuned for a different sim/context) ---
   // Lower values = slower response.
@@ -820,6 +821,7 @@
     const dyr = PY - RUNWAY_REF_Y;
     const dist = Math.sqrt(dxr*dxr + dyr*dyr);
     const vvMps = Math.max(0, h_speed_mph * MPH_TO_MPS);
+    const vvKmh = vvMps * MPS_TO_KMH;
     const onRunway =
       (Math.abs(PX) <= WR) &&
       (PY >= RUNWAY_START_Y) &&
@@ -844,7 +846,7 @@
 
     endMessage.push("");
     endMessage.push("VALORES RELATIVOS AO POUSO:");
-    endMessage.push(`VELOCIDADE DO AR = ${Math.floor(vvMps)} M/S`);
+    endMessage.push(`VELOCIDADE DO AR = ${Math.floor(vvKmh)} KM/H`);
     endMessage.push(`DISTANCIA        = ${Math.floor(dist)} M`);
     endMessage.push(`INCLINACAO FRONTAL= ${Math.floor(pitch)}`);
     endMessage.push(`INCLINACAO LATERAL= ${Math.floor(roll)}`);
@@ -1130,10 +1132,10 @@
     const cxRpm      = 220;
 
     const dials = [
-      { cx: cxAirspeed, top: "AIRSPEED",  bot: "BEARING"  },
+      { cx: cxAirspeed, top: "AIRSPEED km/h",  bot: "BEARING"  },
       { cx: cxHorizon,  top: "HORIZ",     bot: "RUNWAY"   },
       { cx: cxAltitude, top: "ALTITUDE",  bot: "DRIFT"    },
-      { cx: cxVario,    top: "VARIO",     bot: ""         },
+      { cx: cxVario,    top: "VARIOMETER m/s",     bot: ""         },
       { cx: cxRpm,      top: "RPM",       bot: "DIST"     },
     ];
 
@@ -1151,7 +1153,12 @@
     const yBotLabel  = 166;
     const yBotValue  = 180;
 
-    ctx.font = "10px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+    // Keep text comfortably away from the analog dials.
+    // (Especially important now that some labels include units.)
+    const FONT_LABEL = "8px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+    const FONT_VALUE = "9px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+
+    ctx.font = FONT_LABEL;
     for (const d of dials) {
       textCentered(d.cx, yTopLabel, d.top);
       textCentered(d.cx, yBotLabel, d.bot);
@@ -1162,19 +1169,24 @@
     const dist = started ? Math.sqrt(PX*PX + (PY - RUNWAY_REF_Y)*(PY - RUNWAY_REF_Y)) : 0;
 
     const vvMps = Math.max(0, h_speed_mph * MPH_TO_MPS);
+    const vvKmh = vvMps * MPS_TO_KMH;
     const vsMps = started ? (v_speed_ft * FT_TO_M / DT) : 0; // m/s (vertical)
+    const VARIO_MAX_MPS = 20.0; // dial full-scale: -20..+20 m/s
+    const vsShownMps = clamp(vsMps, -VARIO_MAX_MPS, VARIO_MAX_MPS);
 
-    ctx.font = "11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
-    textCentered(cxAirspeed, yDialValue, `${Math.floor(vvMps)}`);
+    ctx.font = FONT_VALUE;
+    textCentered(cxAirspeed, yDialValue, `${Math.floor(vvKmh)}`);
     textCentered(cxAltitude, yDialValue, `${Math.floor(PZ)}`);
     {
-      const v = Math.round(vsMps);
+      const v = Math.round(vsShownMps);
       const s = v > 0 ? `+${v}` : `${v}`;
       textCentered(cxVario, yDialValue, s);
     }
     textCentered(cxRpm,      yDialValue, `${Math.floor(rpm)}`);
 
-    needle(cxAirspeed, yDial, 14, vvMps * PI / 200);
+    // Airspeed dial: 0..400 km/h maps to 0..2π.
+    const AIRSPEED_MAX_KMH = 400;
+    needle(cxAirspeed, yDial, 14, clamp(vvKmh, 0, AIRSPEED_MAX_KMH) * 2 * PI / AIRSPEED_MAX_KMH);
 
     // Horizon dial
     {
@@ -1224,18 +1236,17 @@
       // ctx.fillText("DN", cx - r + 2, cy + 10);
 
       // Needle: 0 points left. Positive climbs rotate over the top; negative over the bottom.
-      const VARIO_MAX_MPS = 10.0; // full scale corresponds to ~2000 fpm
-      const frac = clamp(Math.abs(vsMps) / VARIO_MAX_MPS, 0, 1);
+      const frac = clamp(Math.abs(vsShownMps) / VARIO_MAX_MPS, 0, 1);
       const base = -PI / 2;
-      const ang = vsMps >= 0 ? (base + frac * PI) : (base - frac * PI);
-      ctx.font = "11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+      const ang = vsShownMps >= 0 ? (base + frac * PI) : (base - frac * PI);
+      ctx.font = FONT_VALUE;
       needle(cx, cy, 14, ang);
     }
 
     // RPM needle (scaled to 0..~9000 mapped to 0..5*PI)
     needle(cxRpm, yDial, 14, clamp(rpm / 1800, 0, 5) * PI / 5);
 
-    ctx.font = "12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+    ctx.font = FONT_VALUE;
     textCentered(cxAirspeed, yBotValue, `${Math.floor(started ? AD : 0)}`);
     textCentered(cxHorizon,  yBotValue, `${Math.floor(RB)}`);
     textCentered(cxAltitude, yBotValue, `${Math.floor(started ? PX : 0)}`);
