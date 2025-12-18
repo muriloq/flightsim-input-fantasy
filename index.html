@@ -516,7 +516,15 @@
     AD = 0;
 
     // Start throttle / engine
-    TC = 5;
+    // Initialize throttle so the starting RPM is ~2000 and stable (nominal ~= rpm).
+    {
+      const RPM_IDLE = 375;
+      const THROTTLE_POS_MAX = 75;
+      const RPM_PER_THROTTLE = (RPM_MAX - RPM_IDLE) / THROTTLE_POS_MAX;
+      const RPM_START = 2000;
+      throttle_pos = clamp((RPM_START - RPM_IDLE) / RPM_PER_THROTTLE, 0, THROTTLE_POS_MAX);
+      TC = clamp(throttle_pos / 8.5, 0.2, 8.8);
+    }
     ignition_on = true;
     engine_on = true;
 
@@ -524,9 +532,8 @@
     const START_SPEED_KMH = 200;
     h_speed_mph = START_SPEED_KMH * KMH_TO_MPH;
 
-    // Initialize rpm near nominal for TC
-    throttle_pos = clamp(TC * 8.5, 0, 75);
-    rpm = 375 + throttle_pos * 117;
+    // Start rpm
+    rpm = 2000;
 
     // Wind scaling from original BASIC: windSpeed/3
     const X0 = windSpeed / 3;
@@ -606,7 +613,11 @@
   function calcPowerDyn(loopTimeMs) {
     if (ignition_on) {
       if (!engine_on) engine_on = true;
-      const nominal = 375 + (throttle_pos * 117);
+      // Map throttle_pos (0..75) to RPM range (idle..RPM_MAX) so throttle isn't overly strong.
+      const RPM_IDLE = 375;
+      const THROTTLE_POS_MAX = 75;
+      const RPM_PER_THROTTLE = (RPM_MAX - RPM_IDLE) / THROTTLE_POS_MAX;
+      const nominal = RPM_IDLE + (throttle_pos * RPM_PER_THROTTLE);
       if (rpm < nominal) rpm += loopTimeMs * 0.5;
       if (rpm > nominal) rpm -= loopTimeMs * 0.5;
     } else {
