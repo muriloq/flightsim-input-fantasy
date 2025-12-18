@@ -78,6 +78,8 @@
   // The core model scales control torque with airspeed; at very low speeds this can feel
   // unresponsive. We apply a small "effective airspeed" floor *only* for control authority.
   const CTRL_EFF_SPEED_MPH_MIN = 60; // ~97 km/h
+  const randSigned = () => (Math.random() * 2 - 1);
+  const randMul = (pct) => 1 + randSigned() * pct;
 
   // --- Control effectiveness tuning (ported model was tuned for a different sim/context) ---
   // Lower values = slower response.
@@ -450,9 +452,10 @@
     const k = e.key.toLowerCase();
 
     // End screen choices: ignore repeats so holding a key won't restart instantly.
-    if (ended && (k === "s" || k === "n")) {
+    // R = restart (yes), N = stop (no).
+    if (ended && (k === "r" || k === "n")) {
       if (e.repeat) return;
-      if (k === "s") document.getElementById("startBtn").click();
+      if (k === "r") document.getElementById("startBtn").click();
       else if (k === "n") {
         running = false;
         ended = true;
@@ -507,13 +510,15 @@
     // Start position (metric)
     PX = 0;
     PY = -10000;
-    PZ = 750;
+    // Add ~10% randomness to initial altitude.
+    PZ = 750 * randMul(0.10);
 
     // Start attitude
     roll = 0;
     pitch = 0;
-    yaw = 0;
-    AD = 0;
+    // Add ~10% randomness to initial bearing (±36° around north).
+    yaw = randSigned() * 36;
+    AD = wrap360(yaw);
 
     // Start throttle / engine
     // Initialize throttle so the starting RPM is ~2000 and stable (nominal ~= rpm).
@@ -528,8 +533,8 @@
     ignition_on = true;
     engine_on = true;
 
-    // Start speed (cap within new UI/physics limits).
-    const START_SPEED_KMH = 200;
+    // Start speed (+/- 10% randomness).
+    const START_SPEED_KMH = 200 * randMul(0.10);
     h_speed_mph = START_SPEED_KMH * KMH_TO_MPH;
 
     // Start rpm
@@ -884,7 +889,7 @@
     endMessage.push(`DESVIO DA PISTA   = ${Math.floor(PX)} M`);
     endMessage.push(`DIRECAO           = ${Math.floor(AD)} GRAUS`);
     endMessage.push("");
-    endMessage.push("VOAR NOVAMENTE? (S/N)");
+    endMessage.push("REINICIAR? (R/N)");
   }
 
   function computeRunwayBearingRB() {
@@ -1180,18 +1185,27 @@
 
     const yTopLabel  = 92;
     const yDialValue = 102;
-    const yBotLabel  = 166;
-    const yBotValue  = 180;
+    // Two-line bottom label area: label, unit, value.
+    const yBotLabel  = 158;
+    const yBotUnit   = 166;
+    const yBotValue  = 186;
 
     // Keep text comfortably away from the analog dials.
     // (Especially important now that some labels include units.)
     const FONT_LABEL = "7px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
     const FONT_VALUE = "8px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+    const FONT_UNIT  = "6px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
 
     ctx.font = FONT_LABEL;
     for (const d of dials) {
       textCentered(d.cx, yTopLabel, d.top);
       textCentered(d.cx, yBotLabel, d.bot);
+    }
+    // Units under bottom labels (only where relevant).
+    ctx.font = FONT_UNIT;
+    for (const d of dials) {
+      if (d.bot === "BEARING" || d.bot === "RUNWAY") textCentered(d.cx, yBotUnit, "DEGR");
+      else if (d.bot === "DIST") textCentered(d.cx, yBotUnit, "METERS");
     }
 
     const RB = started ? computeRunwayBearingRB() : 0;
