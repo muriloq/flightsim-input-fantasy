@@ -72,6 +72,7 @@
   const MPH_TO_MPS = 0.44704;
   const MPS_TO_MPH = 1 / MPH_TO_MPS;
   const MPS_TO_KMH = 3.6;
+  const KMH_TO_MPH = 1 / 1.609344;
 
   // --- Control effectiveness tuning (ported model was tuned for a different sim/context) ---
   // Lower values = slower response.
@@ -514,8 +515,9 @@
     ignition_on = true;
     engine_on = true;
 
-    // Start speed: match previous game feel (150 m/s) but keep C++ mph state.
-    h_speed_mph = 150 * MPS_TO_MPH;
+    // Start speed (cap within new UI/physics limits).
+    const START_SPEED_KMH = 200;
+    h_speed_mph = START_SPEED_KMH * KMH_TO_MPH;
 
     // Initialize rpm near nominal for TC
     throttle_pos = clamp(TC * 8.5, 0, 75);
@@ -611,8 +613,16 @@
 
   function calcFlightDyn(loopTimeMs) {
     // Port of AirCraft::CalcFlightDyn with the same tuning assumptions.
-    let iSpeed = rpm / 17.5;
+    const LOOP_SEC = loopTimeMs / 1000;
+    const MAX_AIRSPEED_MPH = 400 * KMH_TO_MPH; // cap physical airspeed at 400 km/h
+    const STALL_SPEED_MPH = 80 * KMH_TO_MPH;   // stall threshold at 80 km/h
+    const MAX_VS_MPS = 10.0;                   // cap physical vertical speed at ±10 m/s
+    const MAX_VS_FT_PER_LOOP = MAX_VS_MPS * M_TO_FT * LOOP_SEC;
+    const RPM_TO_MPH = 36.8;                   // tuned so nominal max rpm ~9150 => ~400 km/h
+
+    let iSpeed = rpm / RPM_TO_MPH;
     iSpeed += (pitch * 1.5);
+    iSpeed = clamp(iSpeed, 0, MAX_AIRSPEED_MPH);
 
     let hAccel = ((rpm * (iSpeed - h_speed_mph)) / 10000);
     hAccel /= 1000;
@@ -624,9 +634,10 @@
     } else {
       h_speed_mph += hAccel;
     }
+    h_speed_mph = clamp(h_speed_mph, 0, MAX_AIRSPEED_MPH);
 
     // Lift curve
-    let lSpeed = (h_speed_mph / 65) - 1;
+    let lSpeed = (h_speed_mph / STALL_SPEED_MPH) - 1;
     if (lSpeed > 1) lSpeed = 1;
     let lVeloc = degs(Math.atan(lSpeed));
     lVeloc += 45;
@@ -640,6 +651,7 @@
     const gVeloc = loopTimeMs * (GRAV_C_FTPS / 1000);
     v_speed_ft = gVeloc + lVeloc;
     if ((!airborne) && (v_speed_ft < 0)) v_speed_ft = 0;
+    if (airborne) v_speed_ft = clamp(v_speed_ft, -MAX_VS_FT_PER_LOOP, MAX_VS_FT_PER_LOOP);
 
     // Forward displacement from mph
     delta_z_ft = h_speed_mph * 5280;
@@ -653,7 +665,7 @@
     const AOA = degs(efAOF_rad);
 
     // Stall logic (ported)
-    if (((pitch < AOA) && (AOA < 0)) && (h_speed_mph < 40)) {
+    if (((pitch < AOA) && (AOA < 0)) && (h_speed_mph < STALL_SPEED_MPH)) {
       if ((pitch - AOA) < -20) stall = true;
     }
     if (stall) {
@@ -1132,10 +1144,10 @@
     const cxRpm      = 220;
 
     const dials = [
-      { cx: cxAirspeed, top: "AIRSPEED km/h",  bot: "BEARING"  },
+      { cx: cxAirspeed, top: "AIRSPEED KM/H",  bot: "BEARING"  },
       { cx: cxHorizon,  top: "HORIZ",     bot: "RUNWAY"   },
       { cx: cxAltitude, top: "ALTITUDE",  bot: "DRIFT"    },
-      { cx: cxVario,    top: "VARIOMETER m/s",     bot: ""         },
+      { cx: cxVario,    top: "VARIO M/S",     bot: ""         },
       { cx: cxRpm,      top: "RPM",       bot: "DIST"     },
     ];
 
@@ -1148,15 +1160,15 @@
       }
     }
 
-    const yTopLabel  = 96;
-    const yDialValue = 112;
+    const yTopLabel  = 92;
+    const yDialValue = 102;
     const yBotLabel  = 166;
     const yBotValue  = 180;
 
     // Keep text comfortably away from the analog dials.
     // (Especially important now that some labels include units.)
-    const FONT_LABEL = "8px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
-    const FONT_VALUE = "9px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+    const FONT_LABEL = "7px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+    const FONT_VALUE = "8px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
 
     ctx.font = FONT_LABEL;
     for (const d of dials) {
@@ -1171,7 +1183,7 @@
     const vvMps = Math.max(0, h_speed_mph * MPH_TO_MPS);
     const vvKmh = vvMps * MPS_TO_KMH;
     const vsMps = started ? (v_speed_ft * FT_TO_M / DT) : 0; // m/s (vertical)
-    const VARIO_MAX_MPS = 20.0; // dial full-scale: -20..+20 m/s
+    const VARIO_MAX_MPS = 10.0; // dial full-scale: -10..+10 m/s
     const vsShownMps = clamp(vsMps, -VARIO_MAX_MPS, VARIO_MAX_MPS);
 
     ctx.font = FONT_VALUE;
