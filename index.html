@@ -74,6 +74,10 @@
   const MPS_TO_KMH = 3.6;
   const KMH_TO_MPH = 1 / 1.609344;
   const RPM_MAX = 3000;
+  // Low-speed handling helpers:
+  // The core model scales control torque with airspeed; at very low speeds this can feel
+  // unresponsive. We apply a small "effective airspeed" floor *only* for control authority.
+  const CTRL_EFF_SPEED_MPH_MIN = 60; // ~97 km/h
 
   // --- Control effectiveness tuning (ported model was tuned for a different sim/context) ---
   // Lower values = slower response.
@@ -671,24 +675,30 @@
   }
 
   function inertialDamp() {
+    // At low speeds, the speed-scaled control torques are small; overly aggressive damping
+    // can zero out the resulting small angular deltas and make controls feel "dead".
+    // Reduce damping a bit at low speed while airborne to preserve responsiveness.
+    const eff = airborne ? clamp(h_speed_mph / CTRL_EFF_SPEED_MPH_MIN, 0.35, 1.0) : 1.0;
+    const dampDiv = 10 / eff; // larger => less damping
+    const eps = airborne ? 0.003 : 0.01;
     if (deltaVect.dPitch) {
-      deltaVect.dPitch -= deltaVect.dPitch / 10;
-      if (((deltaVect.dPitch > 0) && (deltaVect.dPitch < 0.01)) ||
-          ((deltaVect.dPitch < 0) && (deltaVect.dPitch > -0.01))) {
+      deltaVect.dPitch -= deltaVect.dPitch / dampDiv;
+      if (((deltaVect.dPitch > 0) && (deltaVect.dPitch < eps)) ||
+          ((deltaVect.dPitch < 0) && (deltaVect.dPitch > -eps))) {
         deltaVect.dPitch = 0;
       }
     }
     if (deltaVect.dYaw) {
-      deltaVect.dYaw -= deltaVect.dYaw / 10;
-      if (((deltaVect.dYaw > 0) && (deltaVect.dYaw < 0.01)) ||
-          ((deltaVect.dYaw < 0) && (deltaVect.dYaw > -0.01))) {
+      deltaVect.dYaw -= deltaVect.dYaw / dampDiv;
+      if (((deltaVect.dYaw > 0) && (deltaVect.dYaw < eps)) ||
+          ((deltaVect.dYaw < 0) && (deltaVect.dYaw > -eps))) {
         deltaVect.dYaw = 0;
       }
     }
     if (deltaVect.dRoll) {
-      deltaVect.dRoll -= deltaVect.dRoll / 10;
-      if (((deltaVect.dRoll > 0) && (deltaVect.dRoll < 0.01)) ||
-          ((deltaVect.dRoll < 0) && (deltaVect.dRoll > -0.01))) {
+      deltaVect.dRoll -= deltaVect.dRoll / dampDiv;
+      if (((deltaVect.dRoll > 0) && (deltaVect.dRoll < eps)) ||
+          ((deltaVect.dRoll < 0) && (deltaVect.dRoll > -eps))) {
         deltaVect.dRoll = 0;
       }
     }
@@ -702,21 +712,22 @@
   }
 
   function calcROC(loopTimeMs) {
+    const ctrlSpeedMph = airborne ? Math.max(h_speed_mph, CTRL_EFF_SPEED_MPH_MIN) : h_speed_mph;
     let torque;
     if (airborne) {
       if (aileron_pos !== 0) {
-        torque = ((h_speed_mph * aileron_pos) / 10000);
+        torque = ((ctrlSpeedMph * aileron_pos) / 10000);
         if (deltaVect.dRoll !== (torque * loopTimeMs)) deltaVect.dRoll += torque * AILERON_GAIN;
       }
     }
     if (elevator_pos !== 0) {
-      torque = ((h_speed_mph * elevator_pos) / 10000);
+      torque = ((ctrlSpeedMph * elevator_pos) / 10000);
       if ((!airborne) && (torque > 0)) torque = 0;
       if (deltaVect.dPitch !== (torque * loopTimeMs)) deltaVect.dPitch += torque * ELEVATOR_GAIN;
     }
-    if (h_speed_mph) {
+    if (ctrlSpeedMph) {
       torque = 0.0;
-      if (rudder_pos !== 0) torque = -((h_speed_mph * rudder_pos) / 10000) * RUDDER_GAIN;
+      if (rudder_pos !== 0) torque = -((ctrlSpeedMph * rudder_pos) / 10000) * RUDDER_GAIN;
       torque += calcTurnRate();
       if (deltaVect.dYaw !== (torque * loopTimeMs)) deltaVect.dYaw += torque * 1.5;
     }
@@ -750,10 +761,10 @@
       else pitch = (-180 - pitch);
     }
 
-    // damp close to zero
-    if ((pitch > -0.5) && (pitch < 0.5)) pitch = 0;
-    if ((roll > -0.5) && (roll < 0.5)) roll = 0;
-    if ((yaw > -0.5) && (yaw < 0.5)) yaw = 0;
+    // damp close to zero (avoid aggressive "auto-level" feel at low speed)
+    if ((pitch > -0.2) && (pitch < 0.2)) pitch = 0;
+    if ((roll > -0.2) && (roll < 0.2)) roll = 0;
+    if ((yaw > -0.2) && (yaw < 0.2)) yaw = 0;
   }
 
   function integratePosition(loopTimeMs) {
