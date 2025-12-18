@@ -73,6 +73,7 @@
   const MPS_TO_MPH = 1 / MPH_TO_MPS;
   const MPS_TO_KMH = 3.6;
   const KMH_TO_MPH = 1 / 1.609344;
+  const RPM_MAX = 3000;
 
   // --- Control effectiveness tuning (ported model was tuned for a different sim/context) ---
   // Lower values = slower response.
@@ -609,20 +610,17 @@
       if (rpm) rpm -= (loopTimeMs / 2);
     }
     if (rpm < 0) rpm = 0;
+    if (rpm > RPM_MAX) rpm = RPM_MAX;
   }
 
   function calcFlightDyn(loopTimeMs) {
     // Port of AirCraft::CalcFlightDyn with the same tuning assumptions.
-    const LOOP_SEC = loopTimeMs / 1000;
-    const MAX_AIRSPEED_MPH = 400 * KMH_TO_MPH; // cap physical airspeed at 400 km/h
     const STALL_SPEED_MPH = 80 * KMH_TO_MPH;   // stall threshold at 80 km/h
-    const MAX_VS_MPS = 10.0;                   // cap physical vertical speed at ±10 m/s
-    const MAX_VS_FT_PER_LOOP = MAX_VS_MPS * M_TO_FT * LOOP_SEC;
-    const RPM_TO_MPH = 36.8;                   // tuned so nominal max rpm ~9150 => ~400 km/h
+    // Tune: rpm hard-caps at 3000, so set this so max rpm yields ~400 km/h (~248.5 mph).
+    const RPM_TO_MPH = RPM_MAX / (400 * KMH_TO_MPH);
 
     let iSpeed = rpm / RPM_TO_MPH;
     iSpeed += (pitch * 1.5);
-    iSpeed = clamp(iSpeed, 0, MAX_AIRSPEED_MPH);
 
     let hAccel = ((rpm * (iSpeed - h_speed_mph)) / 10000);
     hAccel /= 1000;
@@ -634,7 +632,6 @@
     } else {
       h_speed_mph += hAccel;
     }
-    h_speed_mph = clamp(h_speed_mph, 0, MAX_AIRSPEED_MPH);
 
     // Lift curve
     let lSpeed = (h_speed_mph / STALL_SPEED_MPH) - 1;
@@ -651,7 +648,6 @@
     const gVeloc = loopTimeMs * (GRAV_C_FTPS / 1000);
     v_speed_ft = gVeloc + lVeloc;
     if ((!airborne) && (v_speed_ft < 0)) v_speed_ft = 0;
-    if (airborne) v_speed_ft = clamp(v_speed_ft, -MAX_VS_FT_PER_LOOP, MAX_VS_FT_PER_LOOP);
 
     // Forward displacement from mph
     delta_z_ft = h_speed_mph * 5280;
@@ -1183,14 +1179,14 @@
     const vvMps = Math.max(0, h_speed_mph * MPH_TO_MPS);
     const vvKmh = vvMps * MPS_TO_KMH;
     const vsMps = started ? (v_speed_ft * FT_TO_M / DT) : 0; // m/s (vertical)
-    const VARIO_MAX_MPS = 10.0; // dial full-scale: -10..+10 m/s
-    const vsShownMps = clamp(vsMps, -VARIO_MAX_MPS, VARIO_MAX_MPS);
+    const VARIO_DIAL_MAX_MPS = 20.0; // analog scale only: -20..+20 m/s
+    const vsNeedleMps = clamp(vsMps, -VARIO_DIAL_MAX_MPS, VARIO_DIAL_MAX_MPS);
 
     ctx.font = FONT_VALUE;
     textCentered(cxAirspeed, yDialValue, `${Math.floor(vvKmh)}`);
     textCentered(cxAltitude, yDialValue, `${Math.floor(PZ)}`);
     {
-      const v = Math.round(vsShownMps);
+      const v = Math.round(vsMps);
       const s = v > 0 ? `+${v}` : `${v}`;
       textCentered(cxVario, yDialValue, s);
     }
@@ -1248,15 +1244,16 @@
       // ctx.fillText("DN", cx - r + 2, cy + 10);
 
       // Needle: 0 points left. Positive climbs rotate over the top; negative over the bottom.
-      const frac = clamp(Math.abs(vsShownMps) / VARIO_MAX_MPS, 0, 1);
+      const frac = clamp(Math.abs(vsNeedleMps) / VARIO_DIAL_MAX_MPS, 0, 1);
       const base = -PI / 2;
-      const ang = vsShownMps >= 0 ? (base + frac * PI) : (base - frac * PI);
+      const ang = vsNeedleMps >= 0 ? (base + frac * PI) : (base - frac * PI);
       ctx.font = FONT_VALUE;
       needle(cx, cy, 14, ang);
     }
 
     // RPM needle (scaled to 0..~9000 mapped to 0..5*PI)
-    needle(cxRpm, yDial, 14, clamp(rpm / 1800, 0, 5) * PI / 5);
+    // RPM needle: RPM_MAX maps to full scale.
+    needle(cxRpm, yDial, 14, clamp(rpm / (RPM_MAX / 5), 0, 5) * PI / 5);
 
     ctx.font = FONT_VALUE;
     textCentered(cxAirspeed, yBotValue, `${Math.floor(started ? AD : 0)}`);
