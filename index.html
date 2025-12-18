@@ -1168,7 +1168,7 @@
     const cxRpm      = 220;
 
     const dials = [
-      { cx: cxAirspeed, top: "AIRSPEED KM/H",  bot: "BEARING"  },
+      { cx: cxAirspeed, top: "AIRSPEED KM/H",  bot: ""  },
       { cx: cxHorizon,  top: "HORIZ",     bot: "RUNWAY"   },
       { cx: cxAltitude, top: "ALTITUDE",  bot: "DRIFT"    },
       { cx: cxVario,    top: "VARIO M/S",     bot: ""         },
@@ -1207,6 +1207,50 @@
     for (const d of dials) {
       if (d.bot === "BEARING" || d.bot === "RUNWAY") textCentered(d.cx, yBotUnit, "DEGR");
       else if (d.bot === "DIST") textCentered(d.cx, yBotUnit, "METERS");
+    }
+
+    // Heading indicator (compass rose) in the AIRSPEED column bottom area.
+    // Driven by current direction/heading value (AD). Keep minimalist and keep the digital value.
+    {
+      const cx = cxAirspeed;
+      const cy = yBotUnit;
+      const r = 10;
+
+      circle(cx, cy, r);
+
+      // Rotating compass card: rotate opposite to aircraft heading so the top shows current direction.
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(-AD * C);
+
+      // Tick marks: minor every 30°, major at cardinals.
+      for (let deg = 0; deg < 360; deg += 30) {
+        const a = deg * C;
+        const isMajor = (deg % 90) === 0;
+        const r1 = r - (isMajor ? 1 : 2);
+        const r2 = r;
+        line(r1 * Math.sin(a), -r1 * Math.cos(a), r2 * Math.sin(a), -r2 * Math.cos(a));
+      }
+
+      // Cardinal letters.
+      ctx.font = FONT_UNIT;
+      const card = [
+        ["N", 0],
+        ["E", 90],
+        ["S", 180],
+        ["W", 270],
+      ];
+      for (const [ch, deg] of card) {
+        const a = deg * C;
+        const tx = (r - 4) * Math.sin(a);
+        const ty = -(r - 4) * Math.cos(a) + 2; // baseline tweak
+        textCentered(tx, ty, ch);
+      }
+      ctx.restore();
+
+      // Fixed reference (aircraft): center cross.
+      line(cx - 2, cy, cx + 2, cy);
+      line(cx, cy - 4, cx, cy + 4);
     }
 
     const RB = started ? computeRunwayBearingRB() : 0;
