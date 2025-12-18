@@ -74,6 +74,7 @@
   const MPS_TO_KMH = 3.6;
   const KMH_TO_MPH = 1 / 1.609344;
   const RPM_MAX = 3000;
+  const RPM_IDLE = 50;
   // Low-speed handling helpers:
   // The core model scales control torque with airspeed; at very low speeds this can feel
   // unresponsive. We apply a small "effective airspeed" floor *only* for control authority.
@@ -524,7 +525,6 @@
     // Start throttle / engine
     // Initialize throttle so the starting RPM is ~2000 and stable (nominal ~= rpm).
     {
-      const RPM_IDLE = 375;
       const THROTTLE_POS_MAX = 75;
       const RPM_PER_THROTTLE = (RPM_MAX - RPM_IDLE) / THROTTLE_POS_MAX;
       const RPM_START = 2000;
@@ -620,7 +620,6 @@
     if (ignition_on) {
       if (!engine_on) engine_on = true;
       // Map throttle_pos (0..75) to RPM range (idle..RPM_MAX) so throttle isn't overly strong.
-      const RPM_IDLE = 375;
       const THROTTLE_POS_MAX = 75;
       const RPM_PER_THROTTLE = (RPM_MAX - RPM_IDLE) / THROTTLE_POS_MAX;
       const nominal = RPM_IDLE + (throttle_pos * RPM_PER_THROTTLE);
@@ -631,6 +630,8 @@
       if (rpm) rpm -= (loopTimeMs / 2);
     }
     if (rpm < 0) rpm = 0;
+    // Minimum running/idle RPM while ignition is on.
+    if (ignition_on && rpm > 0 && rpm < RPM_IDLE) rpm = RPM_IDLE;
     if (rpm > RPM_MAX) rpm = RPM_MAX;
   }
 
@@ -647,11 +648,17 @@
     hAccel /= 1000;
     hAccel *= loopTimeMs;
 
+    // Brake acts as:
+    // - Strong ground brake when on wheels
+    // - Mild airbrake drag when airborne (reduces airspeed too, but less than on ground)
+    const BRAKE_GROUND_DECEL_MPH = 1.0;
+    const AIRBRAKE_DECEL_MPH = 0.25;
+
     if (brake && !airborne) {
-      if (h_speed_mph > 0) h_speed_mph -= 1;
-      else h_speed_mph = 0;
+      h_speed_mph = Math.max(0, h_speed_mph - BRAKE_GROUND_DECEL_MPH);
     } else {
       h_speed_mph += hAccel;
+      if (brake && airborne) h_speed_mph = Math.max(0, h_speed_mph - AIRBRAKE_DECEL_MPH);
     }
 
     // Lift curve
