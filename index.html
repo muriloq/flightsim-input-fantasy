@@ -182,10 +182,40 @@
     circle(cx, cy, r + 2);
   }
   function needle(cx, cy, len, aRad) {
-    const x2 = cx + len * Math.sin(aRad);
-    const y2 = cy - len * Math.cos(aRad);
-    line(cx, cy, x2, y2);
+    // Narrow lozenge (diamond) pointer instead of a single line.
+    const ux = Math.sin(aRad);
+    const uy = -Math.cos(aRad);
+    const px = Math.cos(aRad);
+    const py = Math.sin(aRad);
+
+    const tip = len;
+    const tail = len * 0.18;
+    const mid = len * 0.22;
+    const halfW = Math.max(1.0 / _pxScale, len * 0.06);
+
+    const xTip = cx + ux * tip;
+    const yTip = cy + uy * tip;
+    const xTail = cx - ux * tail;
+    const yTail = cy - uy * tail;
+
+    const xL = cx + ux * mid + px * halfW;
+    const yL = cy + uy * mid + py * halfW;
+    const xR = cx + ux * mid - px * halfW;
+    const yR = cy + uy * mid - py * halfW;
+
+    ctx.save();
+    ctx.lineWidth = 1 / _pxScale;
+    ctx.beginPath();
+    ctx.moveTo(xTip, yTip);
+    ctx.lineTo(xL, yL);
+    ctx.lineTo(xTail, yTail);
+    ctx.lineTo(xR, yR);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
   }
+
   function textCentered(cx, y, s) {
     const w = ctx.measureText(s).width;
     ctx.fillText(s, cx - w / 2, y);
@@ -1256,7 +1286,7 @@
       }
       ctx.restore();
 
-      // Fixed reference (aircraft): simplified airplane.
+      // Fixed reference (aircraft): simple airplane marker (no rotation).
       const w = r * 0.55;
       const h = r * 0.35;
       // wings
@@ -1377,7 +1407,7 @@
       const cy = yBotLabel + 4;
       const r = 16;
       const PLANE_SCALE = 0.8; // overall airplane scale
-      const WING_SCALE = 0.8;  // decrease by 20% the width (span) of the angle display
+      const WING_SCALE = 0.8;  // reduced wing span
 
       dialBezel(cx, cy, r);
 
