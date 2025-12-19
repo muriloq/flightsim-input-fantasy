@@ -86,9 +86,9 @@
   // --- Control effectiveness tuning (ported model was tuned for a different sim/context) ---
   // Lower values = slower response.
   // Requested tuning: elevator 2x slower, ailerons 5x slower (relative to previous values).
-  const AILERON_GAIN = 0.4;   // 2.0 / 5
+  const AILERON_GAIN = 0.25;  // reduce roll authority (was 0.4)
   const ELEVATOR_GAIN = 0.75; // 1.5 / 2
-  const RUDDER_GAIN = 0.35;   // reduce yaw authority from rudder (Z/C)
+  const RUDDER_GAIN = 0.22;   // reduce yaw authority from rudder (Z/C) (was 0.35)
   // Rendering-only scaling to make the visible pitch attitude a bit less aggressive.
   // (Does not affect the underlying flight model.)
   const PITCH_RENDER_SCALE = 0.85;
@@ -685,15 +685,14 @@
 
     // Brake acts as:
     // - Strong ground brake when on wheels
-    // - Mild airbrake drag when airborne (reduces airspeed too, but less than on ground)
+    // - Airbrake when airborne: reduce airspeed to ~50% but do not hard-clamp to zero
     const BRAKE_GROUND_DECEL_MPH = 1.0;
-    const AIRBRAKE_DECEL_MPH = 0.25;
 
     if (brake && !airborne) {
       h_speed_mph = Math.max(0, h_speed_mph - BRAKE_GROUND_DECEL_MPH);
     } else {
       h_speed_mph += hAccel;
-      if (brake && airborne) h_speed_mph = Math.max(0, h_speed_mph - AIRBRAKE_DECEL_MPH);
+      if (brake && airborne) h_speed_mph *= 0.5;
     }
 
     // Lift curve
@@ -706,8 +705,8 @@
     lVeloc /= 1000;
     lVeloc *= loopTimeMs;
 
-    // Gravity term (C++ uses -16 ft/sec)
-    const GRAV_C_FTPS = -16.0;
+    // Gravity term (closer to real-world: ~-32.2 ft/s^2)
+    const GRAV_C_FTPS = -32.0;
     const gVeloc = loopTimeMs * (GRAV_C_FTPS / 1000);
     v_speed_ft = gVeloc + lVeloc;
     if ((!airborne) && (v_speed_ft < 0)) v_speed_ft = 0;
@@ -828,11 +827,12 @@
 
   function integratePosition(loopTimeMs) {
     // Port the simplified rotation path in RunFModel (roll rotation omitted in v2.1).
-    const tmpZ = delta_z_ft;
-
-    // Rotate in X by effective angle of flight
-    const newY_ft = -(tmpZ * Math.sin(efAOF_rad));
-    const newZ_ft = (tmpZ * Math.cos(efAOF_rad));
+    // IMPORTANT: In the original port, vertical displacement was derived by rotating the
+    // forward step by efAOF. That makes altitude changes vanish when forward speed is low
+    // (delta_z_ft ~ 0), even if gravity is pulling down. Here we apply the vertical
+    // displacement directly (v_speed_ft is already "feet per loop") so gravity always works.
+    const newY_ft = v_speed_ft;   // vertical displacement per loop (ft)
+    const newZ_ft = delta_z_ft;   // forward displacement per loop (ft)
 
     // Rotate in Y by yaw
     const yawRad = rads(yaw);
@@ -1305,23 +1305,75 @@
     // Compact nav/status readout in the space freed by moving TURN away from VARIO:
     // label on the left, value aligned to the right.
     {
-      const xLabel = cxVario - 48;
-      const xValue = cxVario + 44;
+      // Column-align: labels under VARIO, values under RPM.
+      const xLabel = cxVario;
+      const xValue = cxRpm;
       const y0 = 150;
       const dy = 12;
       ctx.font = FONT_LABEL;
-      ctx.fillText("RUNAWAY DEG", xLabel, y0);
-      ctx.fillText("DRIFT (M)",   xLabel, y0 + dy);
-      ctx.fillText("DIST (M)",    xLabel, y0 + dy * 2);
+      textCentered(xLabel, y0, "RUNAWAY DEG");
+      textCentered(xLabel, y0 + dy, "DRIFT (M)");
+      textCentered(xLabel, y0 + dy * 2, "DIST (M)");
 
       ctx.font = FONT_VALUE;
-      // Right-align values by measuring width.
       const v1 = `${Math.floor(RB)}`;
       const v2 = `${Math.floor(driftM)}`;
       const v3 = `${Math.floor(dist)}`;
-      ctx.fillText(v1, xValue - ctx.measureText(v1).width, y0);
-      ctx.fillText(v2, xValue - ctx.measureText(v2).width, y0 + dy);
-      ctx.fillText(v3, xValue - ctx.measureText(v3).width, y0 + dy * 2);
+      textCentered(xValue, y0, v1);
+      textCentered(xValue, y0 + dy, v2);
+      textCentered(xValue, y0 + dy * 2, v3);
+    }
+
+    // ILS (minimal): below ALTITUDE dial.
+    // Localizer: lateral deviation based on PX (meters) vs runway centerline.
+    // Glideslope: vertical deviation vs a 3° glidepath to the runway threshold (Y=0).
+    {
+      const cx = cxAltitude;
+      const cy = yBotLabel + 4;
+      const r = dialR;
+
+      dialBezel(cx, cy, r);
+
+      // Label below the dial, aligned with the compass (bearing) digital readout row.
+      ctx.font = FONT_LABEL;
+      textCentered(cx, yBotValue, "ILS");
+
+      if (started) {
+        const LOC_FULL_SCALE_M = WR; // 50m => full-scale equals runway half-width (matches evaluation)
+        const loc = clamp(PX / LOC_FULL_SCALE_M, -1, 1);
+
+        const glideDeg = 3.0;
+        const dToThr = Math.max(0, -PY); // meters to runway threshold while on approach
+        const desiredAlt = Math.tan(glideDeg * C) * dToThr;
+        const gsErr = PZ - desiredAlt; // meters (positive = above path)
+
+        const GS_FULL_SCALE_M = 50; // game-friendly
+        const gs = clamp(gsErr / GS_FULL_SCALE_M, -1, 1);
+
+        // Markers (vertical ticks instead of circles)
+        const dotOff = r * 0.5;
+        const dotStep = r * 0.22;
+        const tickH = 1.0;
+        for (const s of [-2, -1, 1, 2]) {
+          // LOC markers (left/right)
+          const xLoc = cx + s * dotStep;
+          line(xLoc, cy - tickH, xLoc, cy + tickH);
+          // GS markers (up/down) — also vertical ticks, centered on x=cx
+          const yGs = cy + s * dotStep;
+          line(cx, yGs - tickH, cx, yGs + tickH);
+        }
+
+        // Needles: vertical needle slides left/right (LOC); horizontal needle slides up/down (GS).
+        const locX = cx + loc * dotOff;
+        const gsY = cy - gs * dotOff;
+
+        line(locX, cy - r * 0.65, locX, cy + r * 0.65);
+        line(cx - r * 0.65, gsY, cx + r * 0.65, gsY);
+      } else {
+        // Centered needles when not started.
+        line(cx, cy - r * 0.65, cx, cy + r * 0.65);
+        line(cx - r * 0.65, cy, cx + r * 0.65, cy);
+      }
     }
 
     const vvMps = Math.max(0, h_speed_mph * MPH_TO_MPS);
@@ -1352,6 +1404,30 @@
       const dx = Math.cos(theta), dy = Math.sin(theta);
       const uiPitch = -pitch * PITCH_RENDER_SCALE;
       const x0 = cx, y0 = cy + uiPitch;
+
+      // Dotted "ground" fill so sky/ground are distinguishable (minimalist).
+      // Fill the side of the horizon line where (p - (x0,y0))·n > 0, with n = (-dy, dx).
+      {
+        const nx = -dy, ny = dx;
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(cx, cy, r, 0, 2 * PI);
+        ctx.clip();
+        // Higher contrast + slightly larger dots so they remain visible at small dial sizes.
+        ctx.fillStyle = "#fff";
+        ctx.globalAlpha = 0.65;
+        const step = 4;
+        const dotPx = 2;
+        for (let yy = cy - r; yy <= cy + r; yy += step) {
+          for (let xx = cx - r; xx <= cx + r; xx += step) {
+            const rx = xx - cx, ry = yy - cy;
+            if (rx * rx + ry * ry > r * r) continue;
+            const dist = (xx - x0) * nx + (yy - y0) * ny;
+            if (dist > 0) dotSoftPx(xx, yy, dotPx);
+          }
+        }
+        ctx.restore();
+      }
 
       const fx = x0 - cx, fy = y0 - cy;
       const b = 2 * (fx * dx + fy * dy);
@@ -1410,6 +1486,10 @@
       const WING_SCALE = 0.8;  // reduced wing span
 
       dialBezel(cx, cy, r);
+
+      // Label below the dial, aligned with the ILS label row.
+      ctx.font = FONT_LABEL;
+      textCentered(cx, yBotValue, "TURN");
 
       // Reference marks (L/R standard rate).
       const m = r - 2;
