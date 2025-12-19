@@ -176,6 +176,11 @@
     ctx.arc(cx, cy, r, 0, Math.PI * 2);
     ctx.stroke();
   }
+  function dialBezel(cx, cy, r) {
+    // Two concentric circles: outer slightly larger than inner.
+    circle(cx, cy, r);
+    circle(cx, cy, r + 2);
+  }
   function needle(cx, cy, len, aRad) {
     const x2 = cx + len * Math.sin(aRad);
     const y2 = cy - len * Math.cos(aRad);
@@ -1166,7 +1171,7 @@
     ctx.lineWidth = 1;
     ctx.fillStyle = "#fff";
 
-    const yDial = 128;
+    const yDial = 120; // moved 20px up
     const dialR = 16; // match TURN coordinator diameter
     const cxAirspeed = 28;
     const cxHorizon  = 76;
@@ -1176,13 +1181,13 @@
 
     const dials = [
       { cx: cxAirspeed, top: "AIRSPEED KM/H",  bot: ""  },
-      { cx: cxHorizon,  top: "HORIZ",     bot: "RUNWAY"   },
-      { cx: cxAltitude, top: "ALTITUDE",  bot: "DRIFT"    },
+      { cx: cxHorizon,  top: "HORIZ",     bot: ""   },
+      { cx: cxAltitude, top: "ALTITUDE",  bot: ""    },
       { cx: cxVario,    top: "VARIO M/S",     bot: ""         },
-      { cx: cxRpm,      top: "RPM",       bot: "DIST"     },
+      { cx: cxRpm,      top: "RPM",       bot: ""     },
     ];
 
-    for (const d of dials) circle(d.cx, yDial, dialR);
+    for (const d of dials) dialBezel(d.cx, yDial, dialR);
     for (const d of dials) {
       for (let k = 0; k < 10; k++) {
         const a = k * PI / 5;
@@ -1191,8 +1196,8 @@
       }
     }
 
-    const yTopLabel  = 92;
-    const yDialValue = 102;
+    const yTopLabel  = 90;  // moved with dials
+    const yDialValue = 100;  // moved with dials
     // Two-line bottom label area: label, unit, value.
     const yBotLabel  = 158;
     const yBotUnit   = 166;
@@ -1209,12 +1214,7 @@
       textCentered(d.cx, yTopLabel, d.top);
       textCentered(d.cx, yBotLabel, d.bot);
     }
-    // Units under bottom labels (only where relevant).
-    ctx.font = FONT_UNIT;
-    for (const d of dials) {
-      if (d.bot === "BEARING" || d.bot === "RUNWAY") textCentered(d.cx, yBotUnit, "DEGR");
-      else if (d.bot === "DIST" || d.bot === "DRIFT") textCentered(d.cx, yBotUnit, "METERS");
-    }
+    // (Bottom labels/units for RUNWAY/DRIFT/DIST were replaced by a compact text block.)
 
     // Heading indicator (compass rose) in the AIRSPEED column bottom area.
     // Driven by current direction/heading value (AD). Keep minimalist and keep the digital value.
@@ -1224,7 +1224,7 @@
       const cy = yBotLabel + 4;
       const r = dialR;
 
-      circle(cx, cy, r);
+      dialBezel(cx, cy, r);
 
       // Rotating compass card: rotate opposite to aircraft heading so the top shows current direction.
       ctx.save();
@@ -1270,6 +1270,29 @@
     const RB = started ? computeRunwayBearingRB() : 0;
     // Distance to runway reference point (meters)
     const dist = started ? Math.sqrt(PX*PX + (PY - RUNWAY_REF_Y)*(PY - RUNWAY_REF_Y)) : 0;
+    const driftM = started ? PX : 0;
+
+    // Compact nav/status readout in the space freed by moving TURN away from VARIO:
+    // label on the left, value aligned to the right.
+    {
+      const xLabel = cxVario - 48;
+      const xValue = cxVario + 44;
+      const y0 = 150;
+      const dy = 12;
+      ctx.font = FONT_LABEL;
+      ctx.fillText("RUNAWAY DEG", xLabel, y0);
+      ctx.fillText("DRIFT (M)",   xLabel, y0 + dy);
+      ctx.fillText("DIST (M)",    xLabel, y0 + dy * 2);
+
+      ctx.font = FONT_VALUE;
+      // Right-align values by measuring width.
+      const v1 = `${Math.floor(RB)}`;
+      const v2 = `${Math.floor(driftM)}`;
+      const v3 = `${Math.floor(dist)}`;
+      ctx.fillText(v1, xValue - ctx.measureText(v1).width, y0);
+      ctx.fillText(v2, xValue - ctx.measureText(v2).width, y0 + dy);
+      ctx.fillText(v3, xValue - ctx.measureText(v3).width, y0 + dy * 2);
+    }
 
     const vvMps = Math.max(0, h_speed_mph * MPH_TO_MPS);
     const vvKmh = vvMps * MPS_TO_KMH;
@@ -1348,16 +1371,15 @@
 
     // Turn coordinator (minimalist): below VARIO.
     {
-      const cx = cxVario;
-      const cy = 170;
+      // Move below the artificial horizon.
+      const cx = cxHorizon;
+      // Match the heading indicator vertical position.
+      const cy = yBotLabel + 4;
       const r = 16;
-      const PLANE_SCALE = 0.8; // make wings 20% smaller
+      const PLANE_SCALE = 0.8; // overall airplane scale
+      const WING_SCALE = 0.8;  // decrease by 20% the width (span) of the angle display
 
-      // Label (outside dial, to avoid clutter).
-      ctx.font = FONT_LABEL;
-      textCentered(cx, cy - r - 4, "TURN");
-
-      circle(cx, cy, r);
+      dialBezel(cx, cy, r);
 
       // Reference marks (L/R standard rate).
       const m = r - 2;
@@ -1377,7 +1399,7 @@
       ctx.translate(cx, cy);
       ctx.rotate(bankNeedleRad);
       // wings
-      line(-r * 0.85 * PLANE_SCALE, 0, r * 0.85 * PLANE_SCALE, 0);
+      line(-r * 0.85 * PLANE_SCALE * WING_SCALE, 0, r * 0.85 * PLANE_SCALE * WING_SCALE, 0);
       // fuselage
       line(0, -r * 0.15 * PLANE_SCALE, 0, r * 0.35 * PLANE_SCALE);
       // tail
@@ -1400,7 +1422,7 @@
 
       const ballX = cx + clamp(slipDps / 3.0, -1, 1) * trackHalf;
       ctx.beginPath();
-      ctx.arc(ballX, trackY, 3 * 0.8, 0, 2 * PI);
+      ctx.arc(ballX, trackY, 3 * 0.8 * 0.5, 0, 2 * PI);
       ctx.fill();
     }
 
@@ -1410,9 +1432,6 @@
 
     ctx.font = FONT_VALUE;
     textCentered(cxAirspeed, yBotValue, `${Math.floor(started ? AD : 0)}`);
-    textCentered(cxHorizon,  yBotValue, `${Math.floor(RB)}`);
-    textCentered(cxAltitude, yBotValue, `${Math.floor(started ? PX : 0)}`);
-    textCentered(cxRpm,      yBotValue, `${Math.floor(dist)}`);
   }
 
   function drawEndScreen() {
