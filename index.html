@@ -94,6 +94,7 @@
   const PITCH_RENDER_SCALE = 0.85;
 
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const clamp01 = (x) => Math.max(0, Math.min(1, x));
   const wrap360 = (deg) => {
     deg %= 360;
     if (deg < 0) deg += 360;
@@ -101,6 +102,231 @@
   };
   const sgn = (x) => (x < 0 ? -1 : x > 0 ? 1 : 0);
   const rnd = (x) => Math.round(x);
+
+  // --- Audio (procedural engine + wind) ---
+  // Audio must be started/resumed from a user gesture in many browsers.
+  let audioCtx = null;
+  let audioEngine = null;
+  let audioOut = null;      // mute-controlled gain
+  let audioMuted = false;
+  let audioStopTimer = 0;
+
+  function makeNoiseNode(audioCtx) {
+    const buffer = audioCtx.createBuffer(1, audioCtx.sampleRate * 2, audioCtx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+
+    const src = audioCtx.createBufferSource();
+    src.buffer = buffer;
+    src.loop = true;
+    return src;
+  }
+
+  function softClipCurve(amount = 2.5, n = 2048) {
+    const curve = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const x = (i / (n - 1)) * 2 - 1;
+      curve[i] = Math.tanh(amount * x);
+    }
+    return curve;
+  }
+
+  function createCockpitGAPiston(audioCtx, { blades = 2, destination } = {}) {
+    // Master out, then cabin low-pass (muffling) into provided destination.
+    const master = audioCtx.createGain();
+    master.gain.value = 0.75;
+
+    const cabinLP = audioCtx.createBiquadFilter();
+    cabinLP.type = "lowpass";
+    cabinLP.frequency.value = 950;
+    cabinLP.Q.value = 0.65;
+
+    master.connect(cabinLP);
+    cabinLP.connect(destination || audioCtx.destination);
+
+    // --- Prop tonal (harmonic stack at multiples of blade-pass frequency) ---
+    const propSum = audioCtx.createGain();
+    const propDrive = audioCtx.createWaveShaper();
+    propDrive.curve = softClipCurve(3.0);
+
+    const propLP = audioCtx.createBiquadFilter();
+    propLP.type = "lowpass";
+    propLP.frequency.value = 2200;
+    propLP.Q.value = 0.4;
+
+    propSum.connect(propDrive);
+    propDrive.connect(propLP);
+    propLP.connect(master);
+
+    const partialCount = 10;
+    const partials = [];
+    const partialGains = [];
+
+    for (let i = 0; i < partialCount; i++) {
+      const k = i + 1;
+      const o = audioCtx.createOscillator();
+      o.type = "sine";
+
+      const g = audioCtx.createGain();
+      g.gain.value = 0;
+
+      o.connect(g);
+      g.connect(propSum);
+
+      o.start();
+      partials.push({ k, o });
+      partialGains.push(g);
+    }
+
+    // --- Cabin resonance (panel/structure drone) ---
+    const cabinRes = audioCtx.createBiquadFilter();
+    cabinRes.type = "bandpass";
+    cabinRes.frequency.value = 180;
+    cabinRes.Q.value = 7.0;
+
+    const cabinResGain = audioCtx.createGain();
+    cabinResGain.gain.value = 0.0;
+
+    propSum.connect(cabinRes);
+    cabinRes.connect(cabinResGain);
+    cabinResGain.connect(master);
+
+    // --- Wind/vent/airframe bed (dark, filtered noise) ---
+    const noise = makeNoiseNode(audioCtx);
+
+    const windHP = audioCtx.createBiquadFilter();
+    windHP.type = "highpass";
+    windHP.frequency.value = 220;
+    windHP.Q.value = 0.7;
+
+    const windBP = audioCtx.createBiquadFilter();
+    windBP.type = "bandpass";
+    windBP.frequency.value = 800;
+    windBP.Q.value = 0.8;
+
+    const windGain = audioCtx.createGain();
+    windGain.gain.value = 0.0;
+
+    noise.connect(windHP);
+    windHP.connect(windBP);
+    windBP.connect(windGain);
+    windGain.connect(master);
+
+    noise.start();
+
+    // --- Optional subtle engine underlay ---
+    const engOsc = audioCtx.createOscillator();
+    engOsc.type = "sawtooth";
+    const engGain = audioCtx.createGain();
+    engGain.gain.value = 0.0;
+
+    const engLP = audioCtx.createBiquadFilter();
+    engLP.type = "lowpass";
+    engLP.frequency.value = 520;
+    engLP.Q.value = 0.5;
+
+    engOsc.connect(engGain);
+    engGain.connect(engLP);
+    engLP.connect(master);
+    engOsc.start();
+
+    function setBlades(n) { blades = Math.max(1, Math.round(n)); }
+
+    function setState({ rpm = 2400, throttle = 0.7, airspeed = 30 } = {}) {
+      const t = audioCtx.currentTime;
+      throttle = clamp01(throttle);
+
+      // Blade-pass frequency model.
+      const bpf = blades * rpm / 60;
+
+      // Prop tonal: partials at k * BPF, with spectral tilt.
+      for (let i = 0; i < partialCount; i++) {
+        const k = partials[i].k;
+        const targetF = Math.max(10, bpf * k);
+        partials[i].o.frequency.setTargetAtTime(targetF, t, 0.02);
+
+        const tilt = 1 / Math.pow(k, 1.12);
+        const level = (0.10 + 0.40 * throttle) * tilt;
+        partialGains[i].gain.setTargetAtTime(level, t, 0.035);
+      }
+
+      // Cabin muffling/brightness (cockpit is darker than outside).
+      cabinLP.frequency.setTargetAtTime(750 + 900 * throttle, t, 0.08);
+      propLP.frequency.setTargetAtTime(1200 + 2200 * throttle, t, 0.06);
+
+      // Resonance tied to throttle for “drone”.
+      cabinRes.frequency.setTargetAtTime(150 + 110 * throttle, t, 0.09);
+      cabinResGain.gain.setTargetAtTime(0.02 + 0.12 * throttle, t, 0.09);
+
+      // Wind bed.
+      const v = Math.max(0, airspeed);
+      const wind = clamp01(v / 70) * (0.25 + 0.75 * throttle);
+      windGain.gain.setTargetAtTime(0.01 + 0.14 * wind, t, 0.12);
+      windHP.frequency.setTargetAtTime(160 + 260 * wind, t, 0.12);
+      windBP.frequency.setTargetAtTime(550 + 900 * wind, t, 0.12);
+
+      // Engine underlay.
+      engOsc.frequency.setTargetAtTime(55 + rpm / 40, t, 0.05);
+      engGain.gain.setTargetAtTime(0.008 + 0.05 * throttle, t, 0.08);
+    }
+
+    function stop() {
+      partials.forEach(p => p.o.stop());
+      noise.stop();
+      engOsc.stop();
+    }
+
+    return { setState, setBlades, stop };
+  }
+
+  function ensureAudioStarted() {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (!audioOut) {
+      audioOut = audioCtx.createGain();
+      audioOut.gain.value = 1.0;
+      audioOut.connect(audioCtx.destination);
+    }
+    // resume() returns a promise; safe to fire-and-forget
+    if (audioCtx.state !== "running") audioCtx.resume().catch(() => {});
+  }
+
+  function setMuted(nextMuted) {
+    audioMuted = !!nextMuted;
+    if (!audioCtx || !audioOut) return;
+    const t = audioCtx.currentTime;
+    audioOut.gain.cancelScheduledValues(t);
+    audioOut.gain.setTargetAtTime(audioMuted ? 0.0 : 1.0, t, 0.03);
+  }
+
+  function startEngineAudio() {
+    ensureAudioStarted();
+    if (!audioCtx) return;
+    if (audioStopTimer) { clearTimeout(audioStopTimer); audioStopTimer = 0; }
+    if (audioEngine) {
+      try { audioEngine.stop(); } catch {}
+      audioEngine = null;
+    }
+    audioEngine = createCockpitGAPiston(audioCtx, { blades: 2, destination: audioOut });
+    setMuted(audioMuted);
+  }
+
+  function stopEngineAudio() {
+    if (!audioCtx || !audioOut || !audioEngine) return;
+    const t = audioCtx.currentTime;
+    audioOut.gain.cancelScheduledValues(t);
+    audioOut.gain.setTargetAtTime(0.0, t, 0.06);
+    const engineToStop = audioEngine;
+    audioEngine = null;
+    audioStopTimer = setTimeout(() => {
+      try { engineToStop.stop(); } catch {}
+      // Restore gain for next start (mute state will reapply).
+      if (audioOut && audioCtx) {
+        const tt = audioCtx.currentTime;
+        audioOut.gain.cancelScheduledValues(tt);
+        audioOut.gain.setTargetAtTime(audioMuted ? 0.0 : 1.0, tt, 0.03);
+      }
+    }, 200);
+  }
 
   // Canvas backing-store resize (resolution independent rendering)
   let _scaleX = 1, _scaleY = 1, _pxScale = 1;
@@ -488,15 +714,27 @@
   window.addEventListener("keydown", (e) => {
     const k = e.key.toLowerCase();
 
+    // Audio mute toggle (no UI; hotkey only).
+    if (k === "m" && !e.repeat) {
+      ensureAudioStarted();
+      setMuted(!audioMuted);
+      return;
+    }
+
     // End screen choices: ignore repeats so holding a key won't restart instantly.
     // R = restart (yes), N = stop (no).
     if (ended && (k === "r" || k === "n")) {
       if (e.repeat) return;
-      if (k === "r") document.getElementById("startBtn").click();
+      if (k === "r") {
+        // Resume audio inside this user gesture, then restart.
+        ensureAudioStarted();
+        document.getElementById("startBtn").click();
+      }
       else if (k === "n") {
         running = false;
         ended = true;
         endMessage = ["Encerrado.", "Recarregue a página para jogar novamente."];
+        stopEngineAudio();
       }
       return;
     }
@@ -1585,6 +1823,15 @@
       steps++;
     }
 
+    // Drive engine audio from sim state.
+    if (audioEngine && audioCtx && audioCtx.state === "running") {
+      audioEngine.setBlades(2);
+      const throttle = clamp01(throttle_pos / 75);
+      const airspeed = Math.max(0, h_speed_mph * MPH_TO_MPS);
+      audioEngine.setState({ rpm, throttle, airspeed });
+    }
+    if (ended) stopEngineAudio();
+
     render();
     requestAnimationFrame(loop);
   }
@@ -1592,6 +1839,7 @@
   document.getElementById("startBtn").addEventListener("click", () => {
     const ws = clamp(parseFloat(document.getElementById("windSpeed").value || "10"), 1, 50);
     const wd = wrap360(parseFloat(document.getElementById("windDir").value || "0"));
+    startEngineAudio();
     started = true;
     resetGame(ws, wd);
   });
