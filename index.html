@@ -1295,12 +1295,13 @@
     ctx.strokeStyle = "#fff";
     ctx.lineWidth = 1;
 
-    line(10, 0, 245, 0);
-    line(245, 0, 245, 80);
-    line(245, 80, 10, 80);
-    line(10, 80, 10, 0);
+    // Full-width top window (no lateral limits): x = 0..255
+    line(0, 0, 255, 0);
+    line(255, 0, 255, 90);
+    line(255, 90, 0, 90);
+    line(0, 90, 0, 0);
 
-    const xmin = 16, xmax = 239, ymin = 1, ymax = 79;
+    const xmin = 0, xmax = 255, ymin = 1, ymax = 89;
     const vw = (xmax - xmin);
     const vh = (ymax - ymin);
     const intr = {
@@ -1545,7 +1546,9 @@
     ctx.lineWidth = 1;
     ctx.fillStyle = "#fff";
 
-    const yDial = 120; // moved 20px up
+    const UI_Y_OFF = 5; // move all instruments down
+
+    const yDial = 120 + UI_Y_OFF; // dial centers
     const dialR = 16; // match TURN coordinator diameter
     const cxAirspeed = 28;
     const cxHorizon  = 76;
@@ -1570,12 +1573,12 @@
       }
     }
 
-    const yTopLabel  = 92;  // moved with dials
-    const yDialValue = 100;  // moved with dials
+    const yTopLabel  = 92 + UI_Y_OFF;  // moved with dials
+    const yDialValue = 100 + UI_Y_OFF;  // moved with dials
     // Two-line bottom label area: label, unit, value.
-    const yBotLabel  = 158;
-    const yBotUnit   = 166;
-    const yBotValue  = 186;
+    const yBotLabel  = 158 + UI_Y_OFF;
+    const yBotUnit   = 166 + UI_Y_OFF;
+    const yBotValue  = 186 + UI_Y_OFF;
 
     // Keep text comfortably away from the analog dials.
     // (Especially important now that some labels include units.)
@@ -1652,7 +1655,7 @@
       // Column-align: labels under VARIO, values under RPM.
       const xLabel = cxVario;
       const xValue = cxRpm;
-      const y0 = 150;
+      const y0 = 150 + UI_Y_OFF;
       const dy = 12;
       ctx.font = FONT_LABEL;
       textCentered(xLabel, y0, "RUNAWAY DEG");
