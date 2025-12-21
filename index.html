@@ -69,7 +69,12 @@
 
   // Three.js background canvas
   const threeCanvas = document.getElementById("three");
-  const TOP_WINDOW_H = 90; // logical pixels: height of 3D window area at the top
+  const IS_MOBILE =
+    (window.matchMedia && window.matchMedia("(pointer: coarse)").matches) ||
+    /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent || "");
+  // Logical pixels: height of 3D window area at the top.
+  // Make it bigger on mobile so the outside view uses more of the screen.
+  const TOP_WINDOW_H = IS_MOBILE ? 120 : 90;
 
   const PI = Math.PI;
   const C = PI / 180;
@@ -595,18 +600,14 @@
     if (!USE_THREE_WORLD) return;
     if (!window.THREE) return;
 
-    const isMobile =
-      (window.matchMedia && window.matchMedia("(pointer: coarse)").matches) ||
-      /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent || "");
-
     const renderer = new THREE.WebGLRenderer({
       canvas: threeCanvas,
-      antialias: !isMobile,
+      antialias: !IS_MOBILE,
       alpha: false,
-      powerPreference: isMobile ? "low-power" : "high-performance",
+      powerPreference: IS_MOBILE ? "low-power" : "high-performance",
     });
     // Mobile fill-rate is precious; also avoids huge drawing buffers.
-    renderer.setPixelRatio(Math.min(isMobile ? 1.5 : 2, window.devicePixelRatio || 1));
+    renderer.setPixelRatio(Math.min(IS_MOBILE ? 1.5 : 2, window.devicePixelRatio || 1));
     renderer.setSize(threeCanvas.clientWidth || 640, threeCanvas.clientHeight || 480, false);
 
     const scene = new THREE.Scene();
@@ -628,7 +629,7 @@
     const hasUint32Elements =
       renderer.capabilities.isWebGL2 || renderer.extensions.has("OES_element_index_uint");
     let gridSize = 1025; // higher-res (2^n + 1) for desktop
-    if (isMobile) gridSize = 257; // good detail, much lighter
+    if (IS_MOBILE) gridSize = 257; // good detail, much lighter
     if ((gridSize * gridSize) > 65535 && !hasUint32Elements) gridSize = 129; // WebGL1-safe
 
     // Bigger terrain so you don't "outrun" it.
@@ -641,7 +642,7 @@
       seed: TERRAIN_SEED,
       // More jagged/mountainous: more octaves + higher lacunarity + slower amplitude falloff.
       // See discussion of octaves/persistence/lacunarity in fractal noise tutorials.
-      octaves: isMobile ? 8 : 10,
+      octaves: IS_MOBILE ? 8 : 10,
       lacunarity: 2.25,
       persistence: 0.62,
       baseFreq: 0.0010,
@@ -1703,12 +1704,14 @@
     ctx.lineWidth = 1;
 
     // Full-width top window (no lateral limits): x = 0..255
-    line(0, 0, 255, 0);
-    line(255, 0, 255, 90);
-    line(255, 90, 0, 90);
-    line(0, 90, 0, 0);
+    const winTop = 0;
+    const winBot = TOP_WINDOW_H;
+    line(0, winTop, 255, winTop);
+    line(255, winTop, 255, winBot);
+    line(255, winBot, 0, winBot);
+    line(0, winBot, 0, winTop);
 
-    const xmin = 0, xmax = 255, ymin = 1, ymax = 89;
+    const xmin = 0, xmax = 255, ymin = 1, ymax = (TOP_WINDOW_H - 1);
     const vw = (xmax - xmin);
     const vh = (ymax - ymin);
     const intr = {
