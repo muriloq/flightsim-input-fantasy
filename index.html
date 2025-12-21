@@ -69,6 +69,7 @@
 
   // Three.js background canvas
   const threeCanvas = document.getElementById("three");
+  const TOP_WINDOW_H = 90; // logical pixels: height of 3D window area at the top
 
   const PI = Math.PI;
   const C = PI / 180;
@@ -498,7 +499,7 @@
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x000000);
 
-    const camera = new THREE.PerspectiveCamera(60, 4 / 3, 0.1, 20000);
+    const camera = new THREE.PerspectiveCamera(60, 4 / 3, 0.1, 120000);
     camera.position.set(0, 50, 50);
 
     const ambient = new THREE.AmbientLight(0xffffff, 0.55);
@@ -508,10 +509,12 @@
     scene.add(dir);
 
     // Terrain
-    const gridSize = 257;
-    const planeSize = 6000;
-    const maxHeight = 60;
-    const terrainH = diamondSquare(gridSize, { seed: 1337, roughness: 0.62 });
+    const gridSize = 513; // higher-res (2^n + 1)
+    // Bigger terrain so you don't "outrun" it.
+    const planeSize = Math.max(80000, RUNWAY_LEN_M * 20);
+    const maxHeight = 420; // much taller mountains (more dramatic variance)
+    const seaLevelN = 0.33; // lower sea level => less sand/water coverage
+    const terrainH = diamondSquare(gridSize, { seed: 1337, roughness: 0.9 }); // more dramatic fractalness
     const geom = new THREE.PlaneGeometry(planeSize, planeSize, gridSize - 1, gridSize - 1);
     geom.rotateX(-Math.PI / 2);
 
@@ -522,15 +525,42 @@
     for (let i = 0; i < pos.count; i++) {
       const xIndex = i % gridSize;
       const yIndex = Math.floor(i / gridSize);
-      const hN = terrainH[yIndex * gridSize + xIndex];
-      const hY = (hN - 0.3) * maxHeight; // shift so some area is near sea level
+      const hN0 = terrainH[yIndex * gridSize + xIndex];
+      // Add stronger contrast: push highs higher and lows lower.
+      // (Keeps 0..1 range so seaLevelN still behaves predictably.)
+      const CONTRAST = 1.8;
+      const hN1 = clamp01((hN0 - 0.5) * CONTRAST + 0.5);
+      const hN = Math.pow(hN1, 1.5);
+
+      // Base height in meters. seaLevelN defines y=0.
+      let hY = (hN - seaLevelN) * maxHeight;
+
+      // Carve runway corridor so it's always visible and surrounded by grass.
+      // Geometry is centered at terrain.position.z = -RUNWAY_REF_Y, so local z=0 is runway center.
+      const x = pos.getX(i);
+      const z = pos.getZ(i);
+      const halfRunway = RUNWAY_LEN_M * 0.5;
+
+      // Flatten the runway footprint slightly below y=0 so the runway plane (y=1) sits above it.
+      if (Math.abs(x) <= WR && Math.abs(z) <= halfRunway) {
+        hY = -1.0;
+      } else {
+        // Grass buffer around runway
+        const grassMarginX = WR * 5;       // widen grass around runway
+        const grassMarginZ = halfRunway + 300;
+        if (Math.abs(x) <= grassMarginX && Math.abs(z) <= grassMarginZ) {
+          hY = Math.max(hY, 1.0);
+        }
+      }
+
       pos.setY(i, hY);
 
-      // Height-based color bands
-      if (hN < 0.28) color.setHex(0x245a9c);      // water
-      else if (hN < 0.32) color.setHex(0xcdbb8a); // sand
-      else if (hN < 0.62) color.setHex(0x3f7f3f); // grass
-      else if (hN < 0.82) color.setHex(0x6b6b6b); // rock
+      // Color by *height in meters* so water/sand are strictly negative.
+      // Make water/sand "deeper": only sufficiently negative heights become sand/water.
+      if (hY < -60) color.setHex(0x245a9c);       // water (deep)
+      else if (hY < -20) color.setHex(0xcdbb8a);  // sand (deep)
+      else if (hY < 80) color.setHex(0x3f7f3f);   // grass (includes shallow negatives)
+      else if (hY < 160) color.setHex(0x6b6b6b);  // rock
       else color.setHex(0xf2f2f2);                // snow
       colors[i * 3 + 0] = color.r;
       colors[i * 3 + 1] = color.g;
@@ -554,17 +584,24 @@
     // Runway mesh (simple)
     const runwayGeom = new THREE.PlaneGeometry(WR * 2, RUNWAY_LEN_M);
     runwayGeom.rotateX(-Math.PI / 2);
-    const runwayMat = new THREE.MeshStandardMaterial({ color: 0x202020, roughness: 1.0, metalness: 0.0 });
+    const runwayMat = new THREE.MeshStandardMaterial({
+      color: 0x000000, // black runway
+      roughness: 1.0,
+      metalness: 0.0,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2,
+    });
     const runway = new THREE.Mesh(runwayGeom, runwayMat);
-    runway.position.set(0, 0.2, -RUNWAY_REF_Y);
+    // Place slightly above terrain (terrain is around y=0) to avoid z-fighting.
+    runway.position.set(0, 1.0, -RUNWAY_REF_Y);
     scene.add(runway);
 
     function resize() {
       const w = threeCanvas.clientWidth || 640;
       const h = threeCanvas.clientHeight || 480;
       renderer.setSize(w, h, false);
-      camera.aspect = w / h;
-      camera.updateProjectionMatrix();
+      // Camera aspect is set per-frame in renderThreeWorld() to match the top window viewport.
     }
     window.addEventListener("resize", () => resize());
     resize();
@@ -578,9 +615,10 @@
     // Sim axes: X right, Y forward, Z up (meters)
     // Three axes: X right, Y up, Z forward/back. Map: (PX, PZ, -PY)
     camera.position.set(PX, PZ + 1.6, -PY);
-    const yawRad = AD * C;
+    // Heading in sim increases clockwise; Three.js yaw increases CCW, so invert.
+    const yawRad = -AD * C;
     const pitchRad = (-pitch * PITCH_RENDER_SCALE) * C;
-    const rollRad = roll * C;
+    const rollRad = -roll * C;
     camera.rotation.order = "YXZ";
     camera.rotation.set(pitchRad, yawRad, rollRad);
   }
@@ -588,7 +626,23 @@
   function renderThreeWorld() {
     if (!three) return;
     updateThreeCameraFromSim();
-    three.renderer.render(three.scene, three.camera);
+    const { renderer, camera, scene } = three;
+
+    // Render only into the top window region (so the camera is centered in that window).
+    const pr = renderer.getPixelRatio();
+    const size = renderer.getSize(new THREE.Vector2()); // CSS pixels
+    const fullW = Math.max(1, Math.floor(size.x * pr));
+    const fullH = Math.max(1, Math.floor(size.y * pr));
+    const topH = Math.max(1, Math.floor(fullH * (TOP_WINDOW_H / H)));
+
+    renderer.setScissorTest(true);
+    renderer.setViewport(0, fullH - topH, fullW, topH);
+    renderer.setScissor(0, fullH - topH, fullW, topH);
+
+    camera.aspect = fullW / topH;
+    camera.updateProjectionMatrix();
+
+    renderer.render(scene, camera);
   }
 
   // Canvas backing-store resize (resolution independent rendering)
@@ -617,6 +671,18 @@
     // Transparent clear so Three.js can show through.
     ctx.setTransform(_scaleX, 0, 0, _scaleY, 0, 0);
     ctx.clearRect(0, 0, W, H);
+  }
+
+  function drawInstrumentPanelBackground() {
+    // Opaque instrument panel (bottom area), so instruments remain readable.
+    ctx.save();
+    ctx.globalAlpha = 1.0;
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, TOP_WINDOW_H, W, H - TOP_WINDOW_H);
+    // Divider line at the window boundary.
+    ctx.strokeStyle = "#fff";
+    line(0, TOP_WINDOW_H, W, TOP_WINDOW_H);
+    ctx.restore();
   }
   function _snapToDevicePixelCenterX(x) {
     // Convert to device pixels, snap to pixel center, convert back to logical coords.
@@ -2102,6 +2168,7 @@
     } else {
       drawWindowAndRunway();
     }
+    drawInstrumentPanelBackground();
     drawInstrumentsAndHUD();
     if (ended) drawEndScreen();
   }
