@@ -595,8 +595,18 @@
     if (!USE_THREE_WORLD) return;
     if (!window.THREE) return;
 
-    const renderer = new THREE.WebGLRenderer({ canvas: threeCanvas, antialias: true, alpha: false });
-    renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+    const isMobile =
+      (window.matchMedia && window.matchMedia("(pointer: coarse)").matches) ||
+      /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent || "");
+
+    const renderer = new THREE.WebGLRenderer({
+      canvas: threeCanvas,
+      antialias: !isMobile,
+      alpha: false,
+      powerPreference: isMobile ? "low-power" : "high-performance",
+    });
+    // Mobile fill-rate is precious; also avoids huge drawing buffers.
+    renderer.setPixelRatio(Math.min(isMobile ? 1.5 : 2, window.devicePixelRatio || 1));
     renderer.setSize(threeCanvas.clientWidth || 640, threeCanvas.clientHeight || 480, false);
 
     const scene = new THREE.Scene();
@@ -612,7 +622,15 @@
     scene.add(dir);
 
     // Terrain
-    const gridSize = 1025; // higher-res (2^n + 1)
+    // NOTE: Large grids require 32-bit element indices (WebGL2 or OES_element_index_uint).
+    // Many mobile browsers still run WebGL1 without that extension; in that case the terrain
+    // would fail to render. So we pick the largest safe size per device.
+    const hasUint32Elements =
+      renderer.capabilities.isWebGL2 || renderer.extensions.has("OES_element_index_uint");
+    let gridSize = 1025; // higher-res (2^n + 1) for desktop
+    if (isMobile) gridSize = 257; // good detail, much lighter
+    if ((gridSize * gridSize) > 65535 && !hasUint32Elements) gridSize = 129; // WebGL1-safe
+
     // Bigger terrain so you don't "outrun" it.
     const planeSize = Math.max(120000, RUNWAY_LEN_M * 30);
     const maxHeight = 650; // reverted mountain height range
@@ -623,7 +641,7 @@
       seed: TERRAIN_SEED,
       // More jagged/mountainous: more octaves + higher lacunarity + slower amplitude falloff.
       // See discussion of octaves/persistence/lacunarity in fractal noise tutorials.
-      octaves: 10,
+      octaves: isMobile ? 8 : 10,
       lacunarity: 2.25,
       persistence: 0.62,
       baseFreq: 0.0010,
