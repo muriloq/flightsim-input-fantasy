@@ -13,7 +13,10 @@
     input { width:170px; padding:6px 8px; background:#050505; border:1px solid #777; border-radius:6px; color:#fff; }
     button { padding:8px 10px; border-radius:8px; border:1px solid #999; background:#111; color:#fff; cursor:pointer; }
     button:hover { background:#222; }
-    canvas { display:block; width:100%; aspect-ratio: 4 / 3; background:#000; border:1px solid #fff; border-radius:4px; }
+    .simstage { position: relative; width: 100%; aspect-ratio: 4 / 3; border:1px solid #fff; border-radius:4px; overflow:hidden; background:#000; }
+    #three, #screen { position:absolute; inset:0; width:100%; height:100%; display:block; }
+    #three { background:#000; }
+    #screen { background: transparent; }
     .row { display:flex; gap:12px; flex-wrap:wrap; align-items:end; }
     .hint { margin-top:8px; font-size:0.95rem; opacity:0.95; }
     .kbd { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; padding:1px 6px; border:1px solid #777; border-radius:6px; background:#111; }
@@ -47,9 +50,13 @@
       </div>
     </div>
 
-    <canvas id="screen" width="256" height="192" aria-label="Tela do simulador"></canvas>
+    <div class="simstage" aria-label="Simulador">
+      <canvas id="three" aria-hidden="true"></canvas>
+      <canvas id="screen" width="256" height="192" aria-label="Instrumentos do simulador"></canvas>
+    </div>
   </div>
 
+  <script src="vendor/three.min.js"></script>
 <script>
 (() => {
   // Logical resolution (simulation/render layout coordinates).
@@ -57,8 +64,11 @@
   // coordinate system is scaled to it.
   const W = 256, H = 192;
   const canvas = document.getElementById("screen");
-  const ctx = canvas.getContext("2d", { alpha: false });
+  const ctx = canvas.getContext("2d", { alpha: true });
   ctx.imageSmoothingEnabled = true;
+
+  // Three.js background canvas
+  const threeCanvas = document.getElementById("three");
 
   const PI = Math.PI;
   const C = PI / 180;
@@ -404,6 +414,183 @@
     }, 200);
   }
 
+  // --- Three.js world (terrain + runway) ---
+  const USE_THREE_WORLD = true;
+  let three = null;
+
+  function mulberry32(seed) {
+    let a = seed >>> 0;
+    return function() {
+      a |= 0;
+      a = (a + 0x6D2B79F5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t ^= t + Math.imul(t ^ (t >>> 7), 61 | t);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  function diamondSquare(size, { seed = 1337, roughness = 0.75 } = {}) {
+    // size must be 2^n + 1 (e.g., 257). Returns Float32Array(size*size).
+    const rand = mulberry32(seed);
+    const h = new Float32Array(size * size);
+    const idx = (x, y) => y * size + x;
+
+    const set = (x, y, v) => { h[idx(x, y)] = v; };
+    const get = (x, y) => h[idx(x, y)];
+
+    // init corners
+    set(0, 0, rand());
+    set(size - 1, 0, rand());
+    set(0, size - 1, rand());
+    set(size - 1, size - 1, rand());
+
+    let step = size - 1;
+    let scale = 1.0;
+    while (step > 1) {
+      const half = step / 2;
+
+      // diamond step
+      for (let y = half; y < size - 1; y += step) {
+        for (let x = half; x < size - 1; x += step) {
+          const a = get(x - half, y - half);
+          const b = get(x + half, y - half);
+          const c = get(x - half, y + half);
+          const d = get(x + half, y + half);
+          const avg = (a + b + c + d) * 0.25;
+          set(x, y, avg + (rand() * 2 - 1) * scale);
+        }
+      }
+
+      // square step
+      for (let y = 0; y < size; y += half) {
+        for (let x = (y / half) % 2 === 0 ? half : 0; x < size; x += step) {
+          let sum = 0;
+          let cnt = 0;
+          if (x - half >= 0) { sum += get(x - half, y); cnt++; }
+          if (x + half < size) { sum += get(x + half, y); cnt++; }
+          if (y - half >= 0) { sum += get(x, y - half); cnt++; }
+          if (y + half < size) { sum += get(x, y + half); cnt++; }
+          const avg = sum / cnt;
+          set(x, y, avg + (rand() * 2 - 1) * scale);
+        }
+      }
+
+      step = half;
+      scale *= roughness;
+    }
+
+    // normalize 0..1
+    let min = Infinity, max = -Infinity;
+    for (let i = 0; i < h.length; i++) { if (h[i] < min) min = h[i]; if (h[i] > max) max = h[i]; }
+    const inv = 1 / (max - min || 1);
+    for (let i = 0; i < h.length; i++) h[i] = (h[i] - min) * inv;
+    return h;
+  }
+
+  function initThreeWorld() {
+    if (!USE_THREE_WORLD) return;
+    if (!window.THREE) return;
+
+    const renderer = new THREE.WebGLRenderer({ canvas: threeCanvas, antialias: true, alpha: false });
+    renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+    renderer.setSize(threeCanvas.clientWidth || 640, threeCanvas.clientHeight || 480, false);
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x000000);
+
+    const camera = new THREE.PerspectiveCamera(60, 4 / 3, 0.1, 20000);
+    camera.position.set(0, 50, 50);
+
+    const ambient = new THREE.AmbientLight(0xffffff, 0.55);
+    scene.add(ambient);
+    const dir = new THREE.DirectionalLight(0xffffff, 0.9);
+    dir.position.set(200, 400, 200);
+    scene.add(dir);
+
+    // Terrain
+    const gridSize = 257;
+    const planeSize = 6000;
+    const maxHeight = 60;
+    const terrainH = diamondSquare(gridSize, { seed: 1337, roughness: 0.62 });
+    const geom = new THREE.PlaneGeometry(planeSize, planeSize, gridSize - 1, gridSize - 1);
+    geom.rotateX(-Math.PI / 2);
+
+    const pos = geom.attributes.position;
+    const colors = new Float32Array(pos.count * 3);
+    const color = new THREE.Color();
+
+    for (let i = 0; i < pos.count; i++) {
+      const xIndex = i % gridSize;
+      const yIndex = Math.floor(i / gridSize);
+      const hN = terrainH[yIndex * gridSize + xIndex];
+      const hY = (hN - 0.3) * maxHeight; // shift so some area is near sea level
+      pos.setY(i, hY);
+
+      // Height-based color bands
+      if (hN < 0.28) color.setHex(0x245a9c);      // water
+      else if (hN < 0.32) color.setHex(0xcdbb8a); // sand
+      else if (hN < 0.62) color.setHex(0x3f7f3f); // grass
+      else if (hN < 0.82) color.setHex(0x6b6b6b); // rock
+      else color.setHex(0xf2f2f2);                // snow
+      colors[i * 3 + 0] = color.r;
+      colors[i * 3 + 1] = color.g;
+      colors[i * 3 + 2] = color.b;
+    }
+    pos.needsUpdate = true;
+    geom.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+    geom.computeVertexNormals();
+
+    const mat = new THREE.MeshStandardMaterial({
+      vertexColors: true,
+      roughness: 1.0,
+      metalness: 0.0,
+      flatShading: false,
+    });
+    const terrain = new THREE.Mesh(geom, mat);
+    // Center terrain so runway is roughly centered.
+    terrain.position.set(0, 0, -RUNWAY_REF_Y);
+    scene.add(terrain);
+
+    // Runway mesh (simple)
+    const runwayGeom = new THREE.PlaneGeometry(WR * 2, RUNWAY_LEN_M);
+    runwayGeom.rotateX(-Math.PI / 2);
+    const runwayMat = new THREE.MeshStandardMaterial({ color: 0x202020, roughness: 1.0, metalness: 0.0 });
+    const runway = new THREE.Mesh(runwayGeom, runwayMat);
+    runway.position.set(0, 0.2, -RUNWAY_REF_Y);
+    scene.add(runway);
+
+    function resize() {
+      const w = threeCanvas.clientWidth || 640;
+      const h = threeCanvas.clientHeight || 480;
+      renderer.setSize(w, h, false);
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+    }
+    window.addEventListener("resize", () => resize());
+    resize();
+
+    three = { renderer, scene, camera };
+  }
+
+  function updateThreeCameraFromSim() {
+    if (!three) return;
+    const { camera } = three;
+    // Sim axes: X right, Y forward, Z up (meters)
+    // Three axes: X right, Y up, Z forward/back. Map: (PX, PZ, -PY)
+    camera.position.set(PX, PZ + 1.6, -PY);
+    const yawRad = AD * C;
+    const pitchRad = (-pitch * PITCH_RENDER_SCALE) * C;
+    const rollRad = roll * C;
+    camera.rotation.order = "YXZ";
+    camera.rotation.set(pitchRad, yawRad, rollRad);
+  }
+
+  function renderThreeWorld() {
+    if (!three) return;
+    updateThreeCameraFromSim();
+    three.renderer.render(three.scene, three.camera);
+  }
+
   // Canvas backing-store resize (resolution independent rendering)
   let _scaleX = 1, _scaleY = 1, _pxScale = 1;
   function resizeCanvasToWindowIfNeeded() {
@@ -427,8 +614,9 @@
 
   function clearScreen() {
     resizeCanvasToWindowIfNeeded();
-    ctx.fillStyle = "#000";
-    ctx.fillRect(0, 0, W, H);
+    // Transparent clear so Three.js can show through.
+    ctx.setTransform(_scaleX, 0, 0, _scaleY, 0, 0);
+    ctx.clearRect(0, 0, W, H);
   }
   function _snapToDevicePixelCenterX(x) {
     // Convert to device pixels, snap to pixel center, convert back to logical coords.
@@ -1909,7 +2097,11 @@
     clearScreen();
     ctx.strokeStyle = "#fff";
     ctx.fillStyle = "#fff";
-    drawWindowAndRunway();
+    if (USE_THREE_WORLD) {
+      renderThreeWorld();
+    } else {
+      drawWindowAndRunway();
+    }
     drawInstrumentsAndHUD();
     if (ended) drawEndScreen();
   }
@@ -1950,10 +2142,12 @@
     const wd = wrap360(parseFloat(document.getElementById("windDir").value || "0"));
     startEngineAudio();
     started = true;
+    if (!three) initThreeWorld();
     resetGame(ws, wd);
   });
 
   setDemoScreenState();
+  initThreeWorld();
   render();
   requestAnimationFrame(loop);
 })();
