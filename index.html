@@ -615,7 +615,7 @@
     const gridSize = 769; // higher-res (2^n + 1)
     // Bigger terrain so you don't "outrun" it.
     const planeSize = Math.max(120000, RUNWAY_LEN_M * 30);
-    const maxHeight = 900; // higher mountains range
+    const maxHeight = 650; // reverted mountain height range
     const seaLevelN = 0.33; // lower sea level => less sand/water coverage
     // Terrain heightmap via multi-octave 2D Perlin fBm:
     // h(x,y)=Σ noise(x f_i, y f_i) a_i with increasing f_i and decreasing a_i.
@@ -1351,14 +1351,17 @@
     // far more controllable while still using the C++ dynamics core.
     const AIL_TARGET = rollIn * 15;
     const ELE_TARGET = pitchIn * 15;
-    // Rudder gets a smaller target deflection to keep yaw more manageable.
-    const RUD_TARGET = rudderIn * 8;
-    const SURF_RESP = 5.0; // 1/s (lower = slower to respond and slower to return to center)
+    // Rudder gets a smaller target deflection and a slower response to make fine drift/ILS
+    // corrections easier with digital (on/off) keys.
+    const RUD_TARGET = rudderIn * 5;
+    const SURF_RESP = 5.0;      // aileron/elevator response
+    const RUD_SURF_RESP = 2.5;  // slower rudder response for smoother control
     const alpha = 1 - Math.exp(-SURF_RESP * dt);
+    const alphaR = 1 - Math.exp(-RUD_SURF_RESP * dt);
     aileron_pos = clamp(aileron_pos + (AIL_TARGET - aileron_pos) * alpha, -15, 15);
     elevator_pos = clamp(elevator_pos + (ELE_TARGET - elevator_pos) * alpha, -15, 15);
 
-    rudder_pos = clamp(rudder_pos + (RUD_TARGET - rudder_pos) * alpha, -15, 15);
+    rudder_pos = clamp(rudder_pos + (RUD_TARGET - rudder_pos) * alphaR, -15, 15);
 
     // Throttle position for C++ formulas (0..~75)
     throttle_pos = clamp(TC * 8.5, 0, 75);
