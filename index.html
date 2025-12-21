@@ -41,8 +41,9 @@
         <span class="kbd">A</span>/<span class="kbd">D</span> rolagem,
         <span class="kbd">W</span>/<span class="kbd">S</span> arfagem (invertido),
         <span class="kbd">Z</span>/<span class="kbd">C</span> leme,
-        <span class="kbd">B</span> freio.
-        No fim: <span class="kbd">S</span> novo voo, <span class="kbd">N</span> parar.
+        <span class="kbd">B</span> freio,
+        <span class="kbd">M</span> mudo.
+        No fim: <span class="kbd">R</span> reiniciar, <span class="kbd">N</span> parar.
       </div>
     </div>
 
@@ -191,6 +192,30 @@
     cabinRes.connect(cabinResGain);
     cabinResGain.connect(master);
 
+    // --- Intake/Exhaust coloration (bandpass stacks) ---
+    const intakeBP = audioCtx.createBiquadFilter();
+    intakeBP.type = "bandpass";
+    intakeBP.frequency.value = 650;
+    intakeBP.Q.value = 1.2;
+
+    const exhaustBP = audioCtx.createBiquadFilter();
+    exhaustBP.type = "bandpass";
+    exhaustBP.frequency.value = 220;
+    exhaustBP.Q.value = 1.6;
+
+    const intakeGain = audioCtx.createGain();
+    intakeGain.gain.value = 0.0;
+    const exhaustGain = audioCtx.createGain();
+    exhaustGain.gain.value = 0.0;
+
+    propSum.connect(intakeBP);
+    intakeBP.connect(intakeGain);
+    intakeGain.connect(master);
+
+    propSum.connect(exhaustBP);
+    exhaustBP.connect(exhaustGain);
+    exhaustGain.connect(master);
+
     // --- Wind/vent/airframe bed (dark, filtered noise) ---
     const noise = makeNoiseNode(audioCtx);
 
@@ -230,6 +255,49 @@
     engLP.connect(master);
     engOsc.start();
 
+    // --- Roughness: slow random-ish modulation for uneven combustion/vibration ---
+    // LFO -> master.gain (very subtle)
+    const roughLFO = audioCtx.createOscillator();
+    roughLFO.type = "sine";
+    roughLFO.frequency.value = 0.6;
+    const roughGain = audioCtx.createGain();
+    roughGain.gain.value = 0.03;
+    roughLFO.connect(roughGain);
+    roughGain.connect(master.gain);
+    roughLFO.start();
+
+    // Noise -> lowpass -> gain -> propSum.gain (subtle flutter)
+    const roughNoise = makeNoiseNode(audioCtx);
+    const roughLP = audioCtx.createBiquadFilter();
+    roughLP.type = "lowpass";
+    roughLP.frequency.value = 1.5;
+    roughLP.Q.value = 0.7;
+    const roughNoiseGain = audioCtx.createGain();
+    roughNoiseGain.gain.value = 0.02;
+    roughNoise.connect(roughLP);
+    roughLP.connect(roughNoiseGain);
+    roughNoiseGain.connect(propSum.gain);
+    roughNoise.start();
+
+    // Modulate intake/exhaust band centers a bit (adds motion/texture)
+    const bandLFO1 = audioCtx.createOscillator();
+    bandLFO1.type = "sine";
+    bandLFO1.frequency.value = 0.10;
+    const bandLFO1Gain = audioCtx.createGain();
+    bandLFO1Gain.gain.value = 120; // Hz
+    bandLFO1.connect(bandLFO1Gain);
+    bandLFO1Gain.connect(intakeBP.frequency);
+    bandLFO1.start();
+
+    const bandLFO2 = audioCtx.createOscillator();
+    bandLFO2.type = "triangle";
+    bandLFO2.frequency.value = 0.07;
+    const bandLFO2Gain = audioCtx.createGain();
+    bandLFO2Gain.gain.value = 60; // Hz
+    bandLFO2.connect(bandLFO2Gain);
+    bandLFO2Gain.connect(exhaustBP.frequency);
+    bandLFO2.start();
+
     function setBlades(n) { blades = Math.max(1, Math.round(n)); }
 
     function setState({ rpm = 2400, throttle = 0.7, airspeed = 30 } = {}) {
@@ -258,6 +326,10 @@
       cabinRes.frequency.setTargetAtTime(150 + 110 * throttle, t, 0.09);
       cabinResGain.gain.setTargetAtTime(0.02 + 0.12 * throttle, t, 0.09);
 
+      // Intake/exhaust coloration tied to throttle (kept subtle).
+      intakeGain.gain.setTargetAtTime(0.01 + 0.10 * throttle, t, 0.10);
+      exhaustGain.gain.setTargetAtTime(0.01 + 0.08 * throttle, t, 0.10);
+
       // Wind bed.
       const v = Math.max(0, airspeed);
       const wind = clamp01(v / 70) * (0.25 + 0.75 * throttle);
@@ -274,6 +346,10 @@
       partials.forEach(p => p.o.stop());
       noise.stop();
       engOsc.stop();
+      roughLFO.stop();
+      roughNoise.stop();
+      bandLFO1.stop();
+      bandLFO2.stop();
     }
 
     return { setState, setBlades, stop };
@@ -403,9 +479,39 @@
     ctx.stroke();
   }
   function dialBezel(cx, cy, r) {
-    // Two concentric circles: outer slightly larger than inner.
+    // Two concentric circles + a square bezel with corner screws (minimalist).
+    const outerR = r + 2;
     circle(cx, cy, r);
-    circle(cx, cy, r + 2);
+    circle(cx, cy, outerR);
+
+    // Square frame a few pixels larger than the outer circle diameter.
+    const pad = 1;
+    const half = outerR + pad;
+    ctx.save();
+    ctx.lineWidth = 1 / _pxScale;
+    ctx.strokeRect(cx - half, cy - half, half * 2, half * 2);
+
+    // Corner screws: 5px diameter circles with a small "slot" line.
+    const screwR = 1.5;
+    const slotLen = 3;
+    const screw_pad = outerR - 2;
+    const corners = [
+      [cx - screw_pad, cy - screw_pad],
+      [cx + screw_pad, cy - screw_pad],
+      [cx + screw_pad, cy + screw_pad],
+      [cx - screw_pad, cy + screw_pad],
+    ];
+    for (const [sx, sy] of corners) {
+      ctx.beginPath();
+      ctx.arc(sx, sy, screwR, 0, 2 * PI);
+      ctx.stroke();
+      // Slot line (slightly angled)
+      const a = 45 * C;
+      const dx = Math.cos(a) * slotLen * 0.5;
+      const dy = Math.sin(a) * slotLen * 0.5;
+      line(sx - dx, sy - dy, sx + dx, sy + dy);
+    }
+    ctx.restore();
   }
   function needle(cx, cy, len, aRad) {
     // Narrow lozenge (diamond) pointer instead of a single line.
@@ -1464,7 +1570,7 @@
       }
     }
 
-    const yTopLabel  = 90;  // moved with dials
+    const yTopLabel  = 92;  // moved with dials
     const yDialValue = 100;  // moved with dials
     // Two-line bottom label area: label, unit, value.
     const yBotLabel  = 158;
