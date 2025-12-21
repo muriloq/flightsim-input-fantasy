@@ -612,7 +612,7 @@
     scene.add(dir);
 
     // Terrain
-    const gridSize = 769; // higher-res (2^n + 1)
+    const gridSize = 1025; // higher-res (2^n + 1)
     // Bigger terrain so you don't "outrun" it.
     const planeSize = Math.max(120000, RUNWAY_LEN_M * 30);
     const maxHeight = 650; // reverted mountain height range
@@ -621,9 +621,11 @@
     // h(x,y)=Σ noise(x f_i, y f_i) a_i with increasing f_i and decreasing a_i.
     const terrainH = fractalHeightmap(gridSize, {
       seed: TERRAIN_SEED,
-      octaves: 9,
-      lacunarity: 2.08,
-      persistence: 0.58,
+      // More jagged/mountainous: more octaves + higher lacunarity + slower amplitude falloff.
+      // See discussion of octaves/persistence/lacunarity in fractal noise tutorials.
+      octaves: 10,
+      lacunarity: 2.25,
+      persistence: 0.62,
       baseFreq: 0.0010,
     });
     const geom = new THREE.PlaneGeometry(planeSize, planeSize, gridSize - 1, gridSize - 1);
@@ -1401,14 +1403,19 @@
 
     // Brake acts as:
     // - Strong ground brake when on wheels
-    // - Airbrake when airborne: reduce airspeed to ~50% but do not hard-clamp to zero
+    // - Gentle airbrake when airborne (time-based so it doesn't instantly zero the airspeed)
     const BRAKE_GROUND_DECEL_MPH = 1.0;
+    const AIRBRAKE_K = 0.35; // 1/s (higher = stronger). ~50% reduction in ~2.0s.
 
     if (brake && !airborne) {
       h_speed_mph = Math.max(0, h_speed_mph - BRAKE_GROUND_DECEL_MPH);
     } else {
       h_speed_mph += hAccel;
-      if (brake && airborne) h_speed_mph *= 0.5;
+      if (brake && airborne) {
+        const dt = loopTimeMs / 1000;
+        const dragMul = Math.exp(-AIRBRAKE_K * dt);
+        h_speed_mph *= dragMul;
+      }
     }
 
     // Lift curve
