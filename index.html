@@ -759,11 +759,21 @@
     updateThreeCameraFromSim();
     const { renderer, camera, scene } = three;
 
+    // Mobile browsers can change layout height (URL bar show/hide) without a resize event.
+    // Keep the WebGL drawing buffer in sync with the displayed canvas size.
+    {
+      const w = threeCanvas.clientWidth || 640;
+      const h = threeCanvas.clientHeight || 480;
+      const s = renderer.getSize(new THREE.Vector2()); // CSS pixels
+      if (Math.round(s.x) !== Math.round(w) || Math.round(s.y) !== Math.round(h)) {
+        renderer.setSize(w, h, false);
+      }
+    }
+
     // Render only into the top window region (so the camera is centered in that window).
-    const pr = renderer.getPixelRatio();
-    const size = renderer.getSize(new THREE.Vector2()); // CSS pixels
-    const fullW = Math.max(1, Math.floor(size.x * pr));
-    const fullH = Math.max(1, Math.floor(size.y * pr));
+    // Use the drawing buffer size (device pixels) to avoid DPR/layout mismatches on mobile.
+    const fullW = Math.max(1, renderer.domElement.width | 0);
+    const fullH = Math.max(1, renderer.domElement.height | 0);
     const topH = Math.max(1, Math.floor(fullH * (TOP_WINDOW_H / H)));
 
     renderer.setScissorTest(true);
