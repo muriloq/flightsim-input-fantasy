@@ -74,7 +74,9 @@
     /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent || "");
   // Logical pixels: height of 3D window area at the top.
   // Make it bigger on mobile so the outside view uses more of the screen.
-  const TOP_WINDOW_H = IS_MOBILE ? 120 : 90;
+  // Keep it above the top-row dial centers so instruments remain over an opaque panel,
+  // but allow the 3D view to extend down near the top-row labels.
+  const TOP_WINDOW_H = IS_MOBILE ? 110 : 90;
 
   const PI = Math.PI;
   const C = PI / 180;
@@ -821,9 +823,12 @@
     ctx.globalAlpha = 1.0;
     ctx.fillStyle = "#000";
     ctx.fillRect(0, TOP_WINDOW_H, W, H - TOP_WINDOW_H);
-    // Divider line at the window boundary.
-    ctx.strokeStyle = "#fff";
-    line(0, TOP_WINDOW_H, W, TOP_WINDOW_H);
+    // On mobile the boundary line tends to feel "too low" once the 3D window is taller;
+    // keep the UI cleaner by omitting it.
+    if (!IS_MOBILE) {
+      ctx.strokeStyle = "#fff";
+      line(0, TOP_WINDOW_H, W, TOP_WINDOW_H);
+    }
     ctx.restore();
   }
   function _snapToDevicePixelCenterX(x) {
@@ -1708,7 +1713,7 @@
     const winBot = TOP_WINDOW_H;
     line(0, winTop, 255, winTop);
     line(255, winTop, 255, winBot);
-    line(255, winBot, 0, winBot);
+    if (!IS_MOBILE) line(255, winBot, 0, winBot);
     line(0, winBot, 0, winTop);
 
     const xmin = 0, xmax = 255, ymin = 1, ymax = (TOP_WINDOW_H - 1);
