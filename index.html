@@ -418,6 +418,7 @@
   // --- Three.js world (terrain + runway) ---
   const USE_THREE_WORLD = true;
   let three = null;
+  let TERRAIN_SEED = (Date.now() ^ ((Math.random() * 0xffffffff) >>> 0)) >>> 0;
 
   function mulberry32(seed) {
     let a = seed >>> 0;
@@ -488,6 +489,108 @@
     return h;
   }
 
+  // --- 2D Perlin noise + fractal Brownian motion (fBm) heightmap ---
+  function makePermTable(seed) {
+    // Deterministic permutation table using mulberry32.
+    const rand = mulberry32(seed);
+    const p = new Uint8Array(256);
+    for (let i = 0; i < 256; i++) p[i] = i;
+    for (let i = 255; i > 0; i--) {
+      const j = (rand() * (i + 1)) | 0;
+      const tmp = p[i]; p[i] = p[j]; p[j] = tmp;
+    }
+    const perm = new Uint8Array(512);
+    for (let i = 0; i < 512; i++) perm[i] = p[i & 255];
+    return perm;
+  }
+
+  function fade(t) {
+    // Perlin fade curve 6t^5-15t^4+10t^3
+    return t * t * t * (t * (t * 6 - 15) + 10);
+  }
+
+  function lerp(a, b, t) { return a + (b - a) * t; }
+
+  function grad2(hash, x, y) {
+    // 8-ish directional gradients
+    switch (hash & 7) {
+      case 0: return  x + y;
+      case 1: return -x + y;
+      case 2: return  x - y;
+      case 3: return -x - y;
+      case 4: return  x;
+      case 5: return -x;
+      case 6: return  y;
+      default: return -y;
+    }
+  }
+
+  function perlin2D(x, y, perm) {
+    const xi = Math.floor(x) & 255;
+    const yi = Math.floor(y) & 255;
+    const xf = x - Math.floor(x);
+    const yf = y - Math.floor(y);
+
+    const u = fade(xf);
+    const v = fade(yf);
+
+    const aa = perm[perm[xi] + yi];
+    const ab = perm[perm[xi] + yi + 1];
+    const ba = perm[perm[xi + 1] + yi];
+    const bb = perm[perm[xi + 1] + yi + 1];
+
+    const x1 = lerp(grad2(aa, xf, yf),     grad2(ba, xf - 1, yf),     u);
+    const x2 = lerp(grad2(ab, xf, yf - 1), grad2(bb, xf - 1, yf - 1), u);
+    // Roughly in [-1, 1]
+    return lerp(x1, x2, v);
+  }
+
+  function fbm2D(x, y, {
+    perm,
+    octaves = 6,
+    lacunarity = 2.0,
+    persistence = 0.5,
+    baseFreq = 0.0018,
+    baseAmp = 1.0,
+  }) {
+    let freq = baseFreq;
+    let amp = baseAmp;
+    let sum = 0;
+    let norm = 0;
+    for (let i = 0; i < octaves; i++) {
+      sum += perlin2D(x * freq, y * freq, perm) * amp;
+      norm += amp;
+      freq *= lacunarity;
+      amp *= persistence;
+    }
+    return sum / (norm || 1); // ~[-1, 1]
+  }
+
+  function fractalHeightmap(size, {
+    seed = 1337,
+    octaves = 7,
+    lacunarity = 2.05,
+    persistence = 0.52,
+    baseFreq = 0.0016,
+  } = {}) {
+    // Returns Float32Array(size*size) normalized 0..1.
+    const perm = makePermTable(seed);
+    const h = new Float32Array(size * size);
+
+    let min = Infinity, max = -Infinity;
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const v = fbm2D(x, y, { perm, octaves, lacunarity, persistence, baseFreq });
+        h[y * size + x] = v;
+        if (v < min) min = v;
+        if (v > max) max = v;
+      }
+    }
+    const inv = 1 / (max - min || 1);
+    for (let i = 0; i < h.length; i++) h[i] = (h[i] - min) * inv;
+    return h;
+  }
+
   function initThreeWorld() {
     if (!USE_THREE_WORLD) return;
     if (!window.THREE) return;
@@ -499,7 +602,7 @@
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x000000);
 
-    const camera = new THREE.PerspectiveCamera(60, 4 / 3, 0.1, 120000);
+    const camera = new THREE.PerspectiveCamera(60, 4 / 3, 0.1, 200000);
     camera.position.set(0, 50, 50);
 
     const ambient = new THREE.AmbientLight(0xffffff, 0.55);
@@ -509,12 +612,20 @@
     scene.add(dir);
 
     // Terrain
-    const gridSize = 513; // higher-res (2^n + 1)
+    const gridSize = 769; // higher-res (2^n + 1)
     // Bigger terrain so you don't "outrun" it.
-    const planeSize = Math.max(80000, RUNWAY_LEN_M * 20);
-    const maxHeight = 420; // much taller mountains (more dramatic variance)
+    const planeSize = Math.max(120000, RUNWAY_LEN_M * 30);
+    const maxHeight = 900; // higher mountains range
     const seaLevelN = 0.33; // lower sea level => less sand/water coverage
-    const terrainH = diamondSquare(gridSize, { seed: 1337, roughness: 0.9 }); // more dramatic fractalness
+    // Terrain heightmap via multi-octave 2D Perlin fBm:
+    // h(x,y)=Σ noise(x f_i, y f_i) a_i with increasing f_i and decreasing a_i.
+    const terrainH = fractalHeightmap(gridSize, {
+      seed: TERRAIN_SEED,
+      octaves: 9,
+      lacunarity: 2.08,
+      persistence: 0.58,
+      baseFreq: 0.0010,
+    });
     const geom = new THREE.PlaneGeometry(planeSize, planeSize, gridSize - 1, gridSize - 1);
     geom.rotateX(-Math.PI / 2);
 
@@ -528,9 +639,9 @@
       const hN0 = terrainH[yIndex * gridSize + xIndex];
       // Add stronger contrast: push highs higher and lows lower.
       // (Keeps 0..1 range so seaLevelN still behaves predictably.)
-      const CONTRAST = 1.8;
+      const CONTRAST = 2.3;
       const hN1 = clamp01((hN0 - 0.5) * CONTRAST + 0.5);
-      const hN = Math.pow(hN1, 1.5);
+      const hN = Math.pow(hN1, 1.35);
 
       // Base height in meters. seaLevelN defines y=0.
       let hY = (hN - seaLevelN) * maxHeight;
@@ -1107,7 +1218,11 @@
     running = false;
     ended = false;
     endMessage = [];
-    PX = 0; PY = 0; PZ = 0;
+    // Pre-start demo state: place aircraft on approach so the 3D outside view is meaningful
+    // even before clicking "Iniciar voo". (Sim remains paused until start.)
+    PX = 0;
+    PY = -10000;
+    PZ = 750;
     VX = 0; VY = 0; VZ = 0;
     GX = 0; GY = 0; GZ = 0;
     AD = 0;
@@ -1119,12 +1234,12 @@
     brake = true;
     ignition_on = true;
     engine_on = true;
-    throttle_pos = 0;
-    rpm = 0;
+    throttle_pos = clamp(((2000 - RPM_IDLE) / ((RPM_MAX - RPM_IDLE) / 75)), 0, 75);
+    rpm = 2000;
     roll = 0;
     pitch = 0;
     yaw = 0;
-    h_speed_mph = 0;
+    h_speed_mph = 200 * KMH_TO_MPH;
     v_speed_ft = 0;
     delta_z_ft = 0;
     efAOF_rad = 0;
@@ -2209,6 +2324,8 @@
     const wd = wrap360(parseFloat(document.getElementById("windDir").value || "0"));
     startEngineAudio();
     started = true;
+    // New random terrain per flight start.
+    TERRAIN_SEED = (Date.now() ^ ((Math.random() * 0xffffffff) >>> 0)) >>> 0;
     if (!three) initThreeWorld();
     resetGame(ws, wd);
   });
