@@ -126,6 +126,21 @@
   const AILERON_GAIN = 0.25;  // reduce roll authority (was 0.4)
   const ELEVATOR_GAIN = 0.75; // 1.5 / 2
   const RUDDER_GAIN = 0.16;   // smoother yaw authority from rudder (Z/C)
+
+  // --- Lateral-directional stability tuning (GA-like, approximated) ---
+  // Units are chosen to shape the existing deltaVect integrator without introducing β/p/r states.
+  // Roll mode: fast roll-rate damping (1–3s) + slow wings-level tendency (weakly stable spiral).
+  const ROLL_RATE_DAMP = 2.0;       // 1/s (strong roll rate decay)
+  const BANK_LEVEL_SLOW = 0.015;    // 1/s (tens of seconds back toward wings-level)
+  const BANK_LEVEL_FAST = 0.035;    // 1/s extra for larger banks (still gentle)
+
+  // Dutch roll feel: yaw↔roll rate coupling with damping so it dies out in a few cycles.
+  const DUTCH_K_YAW_FROM_ROLLRATE = 0.55; // 1/s (roll rate excites yaw rate)
+  const DUTCH_K_ROLL_FROM_YAWRATE = 0.22; // 1/s (yaw rate excites roll rate via dihedral effect)
+  const YAW_RATE_DAMP = 0.55;             // 1/s (yaw rate damping)
+
+  // Adverse yaw: aileron deflection produces yaw opposite the roll direction.
+  const ADVERSE_YAW_GAIN = 0.55;          // scalar (applied like other control torques)
   // Rendering-only scaling to make the visible pitch attitude a bit less aggressive.
   // (Does not affect the underlying flight model.)
   const PITCH_RENDER_SCALE = 0.85;
@@ -1926,6 +1941,36 @@
       if (rudder_pos !== 0) torque = -((ctrlSpeedMph * rudder_pos) / 10000) * RUDDER_GAIN;
       torque += calcTurnRate();
       if (deltaVect.dYaw !== (torque * loopTimeMs)) deltaVect.dYaw += torque * 1.5;
+    }
+
+    // --- Lateral-directional stability (roll mode + dutch roll feel + weak spiral) ---
+    if (airborne && dtS > 0) {
+      // Treat dRoll/dYaw as rate-like states (deg per step -> deg/s), shape, then convert back.
+      let p = deltaVect.dRoll / dtS; // roll rate (deg/s)
+      let r = deltaVect.dYaw / dtS;  // yaw rate  (deg/s)
+
+      // Roll mode: strong roll-rate damping.
+      p *= Math.exp(-ROLL_RATE_DAMP * dtS);
+
+      // Weakly stable spiral: slow wings-level tendency (tens of seconds).
+      const absRoll = Math.abs(roll);
+      const levelK = BANK_LEVEL_SLOW + BANK_LEVEL_FAST * clamp((absRoll - 20) / 50, 0, 1);
+      p += (-(roll) * levelK) * dtS; // p_dot = -levelK*roll
+
+      // Dutch roll feel: coupled yaw↔roll rates with yaw damping so it dies out in a few cycles.
+      // Roll rate excites yaw (adverse yaw/dihedral coupling); yaw rate excites roll (dihedral effect).
+      r += (DUTCH_K_YAW_FROM_ROLLRATE * p) * dtS;
+      p += (DUTCH_K_ROLL_FROM_YAWRATE * r) * dtS;
+      r *= Math.exp(-YAW_RATE_DAMP * dtS);
+
+      // Adverse yaw from ailerons (nose yaws opposite to commanded roll).
+      if (aileron_pos !== 0) {
+        const ayStep = -((ctrlSpeedMph * aileron_pos) / 10000) * ADVERSE_YAW_GAIN; // deg/step
+        r += ayStep / dtS; // convert to deg/s contribution
+      }
+
+      deltaVect.dRoll = p * dtS;
+      deltaVect.dYaw = r * dtS;
     }
 
     // Hard caps on angular deltas (deg per simulation step) to prevent runaway rates
