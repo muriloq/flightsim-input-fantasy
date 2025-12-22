@@ -1268,12 +1268,10 @@
 
     const btnW = 54;
     const btnH = 24;
-    // Center the buttons in the right-side column between rudder and stick.
-    const rightColX0 = rudX1 + 10;
-    const rightColX1 = W - margin;
-    const btnX = clamp(Math.floor((rightColX0 + rightColX1 - btnW) * 0.5), margin, W - margin - btnW);
-    const brakeY = clamp(Math.floor(stickCy - btnH - 10), yTop, yBot - btnH);
-    const muteY  = clamp(brakeY + btnH + 20, yTop, yBot - btnH);
+    // Buttons: center horizontally (requested), and keep well away from the stick on the right.
+    const btnX = clamp(Math.floor(W * 0.5 - btnW * 0.5), margin, W - margin - btnW);
+    const brakeY = clamp(yTop + 22, yTop, yBot - btnH);
+    const muteY  = clamp(brakeY + btnH + 24, yTop, yBot - btnH);
 
     return {
       stick: { cx: stickCx, cy: stickCy, r: stickR },
@@ -2709,7 +2707,11 @@
           cctx.fill();
           cctx.restore();
         }
+        // Ensure text is visible (controls canvas background is black).
+        cctx.save();
+        cctx.fillStyle = "#fff";
         _textCenteredC(b.x + b.w * 0.5, b.y + b.h * 0.5, label);
+        cctx.restore();
       };
       drawBtn(L.brakeBtn, "BREAK", !!brake);
       drawBtn(L.muteBtn, "MUTE", !!audioMuted);
