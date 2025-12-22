@@ -107,7 +107,7 @@
   // Requested tuning: elevator 2x slower, ailerons 5x slower (relative to previous values).
   const AILERON_GAIN = 0.25;  // reduce roll authority (was 0.4)
   const ELEVATOR_GAIN = 0.75; // 1.5 / 2
-  const RUDDER_GAIN = 0.22;   // reduce yaw authority from rudder (Z/C) (was 0.35)
+  const RUDDER_GAIN = 0.16;   // smoother yaw authority from rudder (Z/C)
   // Rendering-only scaling to make the visible pitch attitude a bit less aggressive.
   // (Does not affect the underlying flight model.)
   const PITCH_RENDER_SCALE = 0.85;
@@ -1182,6 +1182,7 @@
   let aileron_pos = 0;
   let elevator_pos = 0;
   let rudder_pos = 0;
+  let rudder_cmd = 0; // [-1..1] ramped command for smoother digital-key rudder
   let brake = true;
 
   // Engine / power
@@ -1271,6 +1272,7 @@
     aileron_pos = 0;
     elevator_pos = 0;
     rudder_pos = 0;
+    rudder_cmd = 0;
     brake = true;
     ignition_on = true;
     engine_on = true;
@@ -1339,6 +1341,7 @@
     aileron_pos = 0;
     elevator_pos = 0;
     rudder_pos = 0;
+    rudder_cmd = 0;
     brake = false;
     stall = false;
     airborne = true;
@@ -1391,11 +1394,21 @@
     // far more controllable while still using the C++ dynamics core.
     const AIL_TARGET = rollIn * 15;
     const ELE_TARGET = pitchIn * 15;
-    // Rudder gets a smaller target deflection and a slower response to make fine drift/ILS
-    // corrections easier with digital (on/off) keys.
-    const RUD_TARGET = rudderIn * 5;
+    // Rudder: use a ramped command so taps produce tiny changes and holding a key ramps
+    // toward full deflection. This makes drift/ILS fine-tuning much easier.
+    const RUD_CMD_RATE = 2.0;     // 1/s ramp-up speed
+    const RUD_CENTER_RATE = 5.0;  // 1/s return-to-center when released
+    if (rudderIn !== 0) {
+      rudder_cmd = clamp(rudder_cmd + rudderIn * RUD_CMD_RATE * dt, -1, 1);
+    } else {
+      // Exponential decay toward 0
+      const k = 1 - Math.exp(-RUD_CENTER_RATE * dt);
+      rudder_cmd += (0 - rudder_cmd) * k;
+    }
+
+    const RUD_TARGET = rudder_cmd * 10; // degrees (max deflection)
     const SURF_RESP = 5.0;      // aileron/elevator response
-    const RUD_SURF_RESP = 2.5;  // slower rudder response for smoother control
+    const RUD_SURF_RESP = 2.0;  // slower rudder response for smoother control
     const alpha = 1 - Math.exp(-SURF_RESP * dt);
     const alphaR = 1 - Math.exp(-RUD_SURF_RESP * dt);
     aileron_pos = clamp(aileron_pos + (AIL_TARGET - aileron_pos) * alpha, -15, 15);
@@ -1595,10 +1608,14 @@
     const newY_ft = v_speed_ft;   // vertical displacement per loop (ft)
     const newZ_ft = delta_z_ft;   // forward displacement per loop (ft)
 
-    // Rotate in Y by yaw
+    // Rotate in Y by yaw. Add a small "crab/slip" track offset from rudder command so you can
+    // correct lateral drift more easily without needing large heading changes (feels like
+    // smaller lateral inertia).
     const yawRad = rads(yaw);
-    const dX_ft = (newZ_ft * Math.sin(yawRad));
-    const dFwd_ft = (newZ_ft * Math.cos(yawRad));
+    const SLIP_DEG_MAX = 10; // max track offset from rudder command when airborne
+    const trackRad = yawRad + (airborne ? (rudder_cmd * SLIP_DEG_MAX * C) : 0);
+    const dX_ft = (newZ_ft * Math.sin(trackRad));
+    const dFwd_ft = (newZ_ft * Math.cos(trackRad));
 
     // Apply to metric positions.
     // Convention used everywhere else in this HTML port (HUD/camera):
