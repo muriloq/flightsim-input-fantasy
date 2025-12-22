@@ -23,11 +23,12 @@
     .hint { margin-top:8px; font-size:0.95rem; opacity:0.95; }
     .kbd { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; padding:1px 6px; border:1px solid #777; border-radius:6px; background:#111; }
 
-    /* Mobile: vertical layout (sim on top half, controls on bottom half) */
+    /* Mobile: vertical layout (sim above, controls below) */
     @media (pointer: coarse) {
       .wrap { max-width:none; padding:8px; gap:10px; }
-      .simstage { aspect-ratio:auto; height:50vh; }
-      .controlstage { display:block; height:50vh; }
+      /* Keep 4:3 to avoid stretching (circles must stay circles). */
+      .simstage { aspect-ratio: 4 / 3; height:auto; max-height:48vh; }
+      .controlstage { display:block; aspect-ratio: 4 / 3; height:auto; max-height:48vh; }
     }
   </style>
 </head>
@@ -2698,7 +2699,7 @@
         }
         _textCenteredC(b.x + b.w * 0.5, b.y + b.h * 0.72, label);
       };
-      drawBtn(L.brakeBtn, "BRAKE", !!brake);
+      drawBtn(L.brakeBtn, "BREAK", !!brake);
       drawBtn(L.muteBtn, "MUTE", !!audioMuted);
     }
 
