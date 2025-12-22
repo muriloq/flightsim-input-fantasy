@@ -1406,7 +1406,8 @@
     const { rudder } = mobileLayout();
     const cx = (rudder.x0 + rudder.x1) * 0.5;
     const half = Math.max(1, (rudder.x1 - rudder.x0) * 0.5);
-    mobileCtl.rudderN = clamp((x - cx) / half, -1, 1);
+    // Map drag-right => right rudder (match expected left/right behavior).
+    mobileCtl.rudderN = clamp((cx - x) / half, -1, 1);
   }
 
   if (controlsCanvas) controlsCanvas.addEventListener("pointerdown", (e) => {
