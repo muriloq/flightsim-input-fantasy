@@ -1323,6 +1323,18 @@
   // User-facing throttle knob (kept for RPM dial behavior)
   let TC = 5; // 0.2..8.8
 
+  // --- Longitudinal stability tuning (GA-like) ---
+  // Map power setting to a hands-off trim speed, then apply restoring pitch moments
+  // when the aircraft is faster/slower than that trim speed.
+  function trimSpeedMphFromThrottle() {
+    // Throttle command normalized.
+    const tN = clamp01((TC - 0.2) / (8.8 - 0.2));
+    // Keep above stall and below the 400 km/h cap used elsewhere.
+    const TRIM_MIN_KMH = 120;
+    const TRIM_MAX_KMH = 380;
+    return _lerp(TRIM_MIN_KMH, TRIM_MAX_KMH, tN) * KMH_TO_MPH;
+  }
+
   const RT = 3, TP = 5, WR = 50; // landing thresholds: roll, pitch, runway half-width (meters)
 
   // Runway model used by the renderer/instruments (world meters).
@@ -1818,6 +1830,7 @@
   function calcROC(loopTimeMs) {
     const ctrlSpeedMph = airborne ? Math.max(h_speed_mph, CTRL_EFF_SPEED_MPH_MIN) : h_speed_mph;
     let torque;
+    const dtS = loopTimeMs / 1000;
     if (airborne) {
       if (aileron_pos !== 0) {
         torque = ((ctrlSpeedMph * aileron_pos) / 10000);
@@ -1828,6 +1841,32 @@
       torque = ((ctrlSpeedMph * elevator_pos) / 10000);
       if ((!airborne) && (torque > 0)) torque = 0;
       if (deltaVect.dPitch !== (torque * loopTimeMs)) deltaVect.dPitch += torque * ELEVATOR_GAIN;
+    }
+
+    // --- Longitudinal velocity stability (GA-like) ---
+    // Pitch responds to speed error around a trim speed (set by throttle), producing a
+    // lightly damped phugoid-like return when the yoke is released.
+    if (airborne) {
+      const trimMph = trimSpeedMphFromThrottle();
+      const speedErr = h_speed_mph - trimMph; // +fast, -slow
+
+      // Speed stability: fast -> pitch up (negative dPitch); slow -> pitch down (positive dPitch).
+      // Units: deg/s per mph.
+      const SPEED_STAB = 0.0065;
+      const stabRateFromSpeed = -SPEED_STAB * speedErr;
+
+      // Static pitch stiffness toward a small nose-up cruise attitude (helps separation of modes).
+      // Units: deg/s per deg.
+      const PITCH_EQ = -2.0;
+      const PITCH_STIFF = 0.04;
+      const stabRateFromPitch = -(pitch - PITCH_EQ) * PITCH_STIFF;
+
+      deltaVect.dPitch += (stabRateFromSpeed + stabRateFromPitch) * dtS;
+
+      // Pitch-rate damping (short-period): oppose pitch rate.
+      // Units: 1/s applied to the pitch-rate state (deltaVect.dPitch).
+      const PITCH_RATE_DAMP = 0.35;
+      deltaVect.dPitch *= Math.exp(-PITCH_RATE_DAMP * dtS);
     }
     if (ctrlSpeedMph) {
       torque = 0.0;
