@@ -1253,23 +1253,27 @@
 
     const stickR = 34;
     const stickCx = W - margin - stickR;
-    const stickCy = Math.floor((yTop + yBot) * 0.5);
+    const stickCy = Math.floor((yTop + yBot) * 0.5) - 6;
 
     const thW = 26;
-    const thH = Math.max(90, (yBot - yTop) - 40);
+    const thH = Math.max(78, (yBot - yTop) - 62);
     const thX = margin + 10;
-    const thY = yTop + 16;
+    const thY = yTop + 10;
 
     const rudH = 14;
-    const rudY = thY + thH + 18;
+    // Keep rudder fully visible (knob extends beyond the track a bit).
+    const rudY = Math.min(yBot - rudH - 14, thY + thH + 14);
     const rudX0 = margin;
     const rudX1 = Math.min(W * 0.55, stickCx - stickR - 18);
 
     const btnW = 54;
     const btnH = 24;
-    const btnX = stickCx - stickR - btnW - 12;
-    const brakeY = yTop + 18;
-    const muteY = brakeY + btnH + 24;
+    // Center the buttons in the right-side column between rudder and stick.
+    const rightColX0 = rudX1 + 10;
+    const rightColX1 = W - margin;
+    const btnX = clamp(Math.floor((rightColX0 + rightColX1 - btnW) * 0.5), margin, W - margin - btnW);
+    const brakeY = clamp(Math.floor(stickCy - btnH - 10), yTop, yBot - btnH);
+    const muteY  = clamp(brakeY + btnH + 20, yTop, yBot - btnH);
 
     return {
       stick: { cx: stickCx, cy: stickCy, r: stickR },
@@ -1524,6 +1528,10 @@
 
     bWasDown = false;
     keysDown.clear();
+
+    // Keep mobile throttle slider consistent with the current engine command,
+    // so starting the sim won't instantly jump the throttle.
+    mobileCtl.throttleN = clamp01(_invLerp(0.2, 8.8, TC));
   }
 
   function resetGame(windSpeed, windDir) {
@@ -1562,6 +1570,9 @@
 
     // Start rpm
     rpm = 2000;
+
+    // Sync mobile throttle slider to the current TC so touch controls match RPM at start.
+    mobileCtl.throttleN = clamp01(_invLerp(0.2, 8.8, TC));
 
     // Wind scaling from original BASIC: windSpeed/3
     const X0 = windSpeed / 3;
@@ -2625,8 +2636,9 @@
   }
   function _textCenteredC(x, y, s) {
     if (!cctx) return;
-    const m = cctx.measureText(s);
-    cctx.fillText(s, x - m.width * 0.5, y);
+    cctx.textAlign = "center";
+    cctx.textBaseline = "middle";
+    cctx.fillText(s, x, y);
   }
 
   function renderMobileControlsCanvas() {
@@ -2646,7 +2658,7 @@
     cctx.fillStyle = "#000";
     cctx.lineWidth = 1;
 
-    const font = "9px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+    const font = "10px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
     cctx.font = font;
 
     // Stick (right)
@@ -2659,7 +2671,7 @@
       const kx = cx + mobileCtl.stickX * r * 0.65;
       const ky = cy + mobileCtl.stickY * r * 0.65;
       cctx.beginPath(); cctx.arc(kx, ky, 9, 0, 2 * PI); cctx.stroke();
-      _textCenteredC(cx, cy - r - 8, "STICK");
+      _textCenteredC(cx, Math.max(8, cy - r - 10), "STICK");
     }
 
     // Throttle
@@ -2670,7 +2682,7 @@
       const knobY = t.y + (1 - mobileCtl.throttleN) * t.h;
       _roundRectPathC(t.x - 6, knobY - 8, t.w + 12, 16, 7);
       cctx.stroke();
-      _textCenteredC(t.x + t.w * 0.5, t.y - 8, "THROTTLE");
+      _textCenteredC(t.x + t.w * 0.5, Math.max(8, t.y - 10), "THROTTLE");
     }
 
     // Rudder
@@ -2683,7 +2695,7 @@
       const knobX = cx + mobileCtl.rudderN * (w * 0.5);
       _roundRectPathC(knobX - 14, r.y - 6, 28, r.h + 12, 7);
       cctx.stroke();
-      _textCenteredC(cx, r.y - 8, "RUDDER");
+      _textCenteredC(cx, Math.max(8, r.y - 10), "RUDDER");
     }
 
     // Buttons
@@ -2697,7 +2709,7 @@
           cctx.fill();
           cctx.restore();
         }
-        _textCenteredC(b.x + b.w * 0.5, b.y + b.h * 0.72, label);
+        _textCenteredC(b.x + b.w * 0.5, b.y + b.h * 0.5, label);
       };
       drawBtn(L.brakeBtn, "BREAK", !!brake);
       drawBtn(L.muteBtn, "MUTE", !!audioMuted);
