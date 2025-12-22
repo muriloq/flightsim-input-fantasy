@@ -76,7 +76,7 @@
   // Make it bigger on mobile so the outside view uses more of the screen.
   // Keep it above the top-row dial centers so instruments remain over an opaque panel,
   // but allow the 3D view to extend down near the top-row labels.
-  const TOP_WINDOW_H = IS_MOBILE ? 120 : 90;
+  const TOP_WINDOW_H = IS_MOBILE ? 130 : 90;
 
   const PI = Math.PI;
   const C = PI / 180;
@@ -765,8 +765,11 @@
     // Mobile browsers can change layout height (URL bar show/hide) without a resize event.
     // Keep the WebGL drawing buffer in sync with the displayed canvas size.
     {
-      const w = threeCanvas.clientWidth || 640;
-      const h = threeCanvas.clientHeight || 480;
+      // Use the overlay canvas rect as the source-of-truth for displayed size so Three.js
+      // always matches the instrument canvas (prevents right-side gaps on desktop too).
+      const rect = canvas.getBoundingClientRect();
+      const w = Math.max(1, Math.round(rect.width));
+      const h = Math.max(1, Math.round(rect.height));
       const s = renderer.getSize(new THREE.Vector2()); // CSS pixels
       if (Math.round(s.x) !== Math.round(w) || Math.round(s.y) !== Math.round(h)) {
         renderer.setSize(w, h, false);
@@ -775,8 +778,9 @@
 
     // Render only into the top window region (so the camera is centered in that window).
     // Use the drawing buffer size (device pixels) to avoid DPR/layout mismatches on mobile.
-    const fullW = Math.max(1, renderer.domElement.width | 0);
-    const fullH = Math.max(1, renderer.domElement.height | 0);
+    const db = renderer.getDrawingBufferSize(new THREE.Vector2());
+    const fullW = Math.max(1, db.x | 0);
+    const fullH = Math.max(1, db.y | 0);
     const topH = Math.max(1, Math.floor(fullH * (TOP_WINDOW_H / H)));
 
     renderer.setScissorTest(true);
