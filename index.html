@@ -16,7 +16,7 @@
     .simstage { position: relative; width: 100%; aspect-ratio: 4 / 3; border:1px solid #fff; border-radius:4px; overflow:hidden; background:#000; }
     #three, #screen { position:absolute; inset:0; width:100%; height:100%; display:block; }
     #three { background:#000; }
-    #screen { background: transparent; }
+    #screen { background: transparent; touch-action: none; }
     .row { display:flex; gap:12px; flex-wrap:wrap; align-items:end; }
     .hint { margin-top:8px; font-size:0.95rem; opacity:0.95; }
     .kbd { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; padding:1px 6px; border:1px solid #777; border-radius:6px; background:#111; }
@@ -1183,6 +1183,77 @@
   let elevator_pos = 0;
   let rudder_pos = 0;
   let rudder_cmd = 0; // [-1..1] ramped command for smoother digital-key rudder
+
+  // --- Mobile touch controls (normalized inputs) ---
+  const mobileCtl = {
+    // stick: right side, self-centering
+    stickId: null,
+    stickX: 0, // [-1..1]
+    stickY: 0, // [-1..1] (screen coords; up is negative)
+    // throttle: left side, non-centering
+    throttleId: null,
+    throttleN: 0, // [0..1]
+    // rudder: left side, self-centering horizontal slider
+    rudderId: null,
+    rudderN: 0, // [-1..1]
+    // tap buttons
+    tapId: null,
+    tapKind: null,
+    tapX0: 0,
+    tapY0: 0,
+  };
+
+  function _lerp(a, b, t) { return a + (b - a) * t; }
+  function _invLerp(a, b, v) { return (v - a) / (b - a); }
+  function mobileLayout() {
+    // Logical coordinates (W x H)
+    const margin = 6;
+    const yTop = Math.max(Math.floor(H * 0.5), TOP_WINDOW_H + 6);
+    const yBot = H - margin;
+
+    const stickR = 26;
+    const stickCx = W - margin - stickR;
+    const stickCy = Math.floor((yTop + yBot) * 0.5) + 4;
+
+    const thW = 18;
+    const thH = Math.max(32, (yBot - yTop) - 14);
+    const thX = margin + 10;
+    const thY = yTop + 4;
+
+    const rudH = 10;
+    const rudY = yBot - rudH;
+    const rudX0 = margin;
+    const rudX1 = Math.min(W * 0.5, stickCx - stickR - 18);
+
+    const btnW = 44;
+    const btnH = 18;
+    const btnX = stickCx - stickR - btnW - 10;
+    const brakeY = yTop + 2;
+    const muteY = brakeY + btnH + 14;
+
+    return {
+      stick: { cx: stickCx, cy: stickCy, r: stickR },
+      throttle: { x: thX, y: thY, w: thW, h: thH },
+      rudder: { x0: rudX0, x1: rudX1, y: rudY, h: rudH },
+      brakeBtn: { x: btnX, y: brakeY, w: btnW, h: btnH },
+      muteBtn: { x: btnX, y: muteY, w: btnW, h: btnH },
+      yTop, yBot,
+    };
+  }
+
+  function _evtToLogical(e) {
+    const rect = canvas.getBoundingClientRect();
+    const x = ((e.clientX - rect.left) / Math.max(1, rect.width)) * W;
+    const y = ((e.clientY - rect.top) / Math.max(1, rect.height)) * H;
+    return { x, y };
+  }
+  function _inRect(x, y, r) {
+    return x >= r.x && x <= (r.x + r.w) && y >= r.y && y <= (r.y + r.h);
+  }
+  function _dist2(ax, ay, bx, by) {
+    const dx = ax - bx, dy = ay - by;
+    return dx * dx + dy * dy;
+  }
   let brake = true;
 
   // Engine / power
@@ -1254,6 +1325,124 @@
     keysDown.add(k);
   });
   window.addEventListener("keyup", (e) => keysDown.delete(e.key.toLowerCase()));
+
+  // --- Mobile pointer controls ---
+  if (IS_MOBILE) {
+    // Prevent touch scrolling/zooming while interacting with the canvas.
+    canvas.style.touchAction = "none";
+  }
+
+  function _toggleBrake() {
+    brake = !brake;
+  }
+  function _toggleMute() {
+    ensureAudioStarted();
+    setMuted(!audioMuted);
+  }
+
+  function _updateStickFromPoint(x, y) {
+    const { stick } = mobileLayout();
+    const dx = x - stick.cx;
+    const dy = y - stick.cy;
+    const r = stick.r;
+    let nx = dx / r;
+    let ny = dy / r;
+    const mag = Math.hypot(nx, ny);
+    if (mag > 1) { nx /= mag; ny /= mag; }
+    // deadzone
+    const dz = 0.12;
+    if (Math.hypot(nx, ny) < dz) { nx = 0; ny = 0; }
+    mobileCtl.stickX = clamp(nx, -1, 1);
+    mobileCtl.stickY = clamp(ny, -1, 1);
+  }
+  function _updateThrottleFromPoint(x, y) {
+    const { throttle } = mobileLayout();
+    const t = clamp01(1 - ((y - throttle.y) / Math.max(1, throttle.h)));
+    mobileCtl.throttleN = t;
+  }
+  function _updateRudderFromPoint(x, y) {
+    const { rudder } = mobileLayout();
+    const cx = (rudder.x0 + rudder.x1) * 0.5;
+    const half = Math.max(1, (rudder.x1 - rudder.x0) * 0.5);
+    mobileCtl.rudderN = clamp((x - cx) / half, -1, 1);
+  }
+
+  canvas.addEventListener("pointerdown", (e) => {
+    if (!IS_MOBILE) return;
+    if (ended) return;
+    const { x, y } = _evtToLogical(e);
+    const L = mobileLayout();
+
+    // Assign pointer to the first matching control.
+    if (mobileCtl.stickId == null && _dist2(x, y, L.stick.cx, L.stick.cy) <= (L.stick.r * 1.35) ** 2) {
+      mobileCtl.stickId = e.pointerId;
+      canvas.setPointerCapture(e.pointerId);
+      _updateStickFromPoint(x, y);
+      return;
+    }
+    if (mobileCtl.throttleId == null && _inRect(x, y, L.throttle)) {
+      mobileCtl.throttleId = e.pointerId;
+      canvas.setPointerCapture(e.pointerId);
+      _updateThrottleFromPoint(x, y);
+      return;
+    }
+    if (mobileCtl.rudderId == null && (x >= L.rudder.x0 && x <= L.rudder.x1 && y >= L.rudder.y && y <= (L.rudder.y + L.rudder.h))) {
+      mobileCtl.rudderId = e.pointerId;
+      canvas.setPointerCapture(e.pointerId);
+      _updateRudderFromPoint(x, y);
+      return;
+    }
+
+    // Buttons (tap).
+    if (_inRect(x, y, L.brakeBtn)) {
+      mobileCtl.tapId = e.pointerId;
+      mobileCtl.tapKind = "brake";
+      mobileCtl.tapX0 = x;
+      mobileCtl.tapY0 = y;
+      canvas.setPointerCapture(e.pointerId);
+      return;
+    }
+    if (_inRect(x, y, L.muteBtn)) {
+      mobileCtl.tapId = e.pointerId;
+      mobileCtl.tapKind = "mute";
+      mobileCtl.tapX0 = x;
+      mobileCtl.tapY0 = y;
+      canvas.setPointerCapture(e.pointerId);
+      return;
+    }
+  });
+
+  canvas.addEventListener("pointermove", (e) => {
+    if (!IS_MOBILE) return;
+    if (ended) return;
+    const { x, y } = _evtToLogical(e);
+    if (mobileCtl.stickId === e.pointerId) { _updateStickFromPoint(x, y); return; }
+    if (mobileCtl.throttleId === e.pointerId) { _updateThrottleFromPoint(x, y); return; }
+    if (mobileCtl.rudderId === e.pointerId) { _updateRudderFromPoint(x, y); return; }
+  });
+
+  function _releasePointer(e) {
+    if (!IS_MOBILE) return;
+    const { x, y } = _evtToLogical(e);
+    const L = mobileLayout();
+
+    // Tap buttons
+    if (mobileCtl.tapId === e.pointerId) {
+      const moved = Math.hypot(x - mobileCtl.tapX0, y - mobileCtl.tapY0);
+      if (moved < 6) {
+        if (mobileCtl.tapKind === "brake" && _inRect(x, y, L.brakeBtn)) _toggleBrake();
+        if (mobileCtl.tapKind === "mute" && _inRect(x, y, L.muteBtn)) _toggleMute();
+      }
+      mobileCtl.tapId = null;
+      mobileCtl.tapKind = null;
+    }
+
+    if (mobileCtl.stickId === e.pointerId) mobileCtl.stickId = null;
+    if (mobileCtl.throttleId === e.pointerId) mobileCtl.throttleId = null;
+    if (mobileCtl.rudderId === e.pointerId) mobileCtl.rudderId = null;
+  }
+  canvas.addEventListener("pointerup", _releasePointer);
+  canvas.addEventListener("pointercancel", _releasePointer);
 
   function setDemoScreenState() {
     running = false;
@@ -1362,11 +1551,33 @@
   }
 
   function updateControls(dt) {
+    // --- Mobile self-centering decay (runs even if the user isn't touching) ---
+    if (IS_MOBILE) {
+      // Stick returns to center slowly when released.
+      if (mobileCtl.stickId == null) {
+        const k = 1 - Math.exp(-3.2 * dt);
+        mobileCtl.stickX += (0 - mobileCtl.stickX) * k;
+        mobileCtl.stickY += (0 - mobileCtl.stickY) * k;
+      }
+      // Rudder slider returns to center when released.
+      if (mobileCtl.rudderId == null) {
+        const k = 1 - Math.exp(-5.0 * dt);
+        mobileCtl.rudderN += (0 - mobileCtl.rudderN) * k;
+      }
+      // Throttle is non-centering; keep last value.
+      // Keep TC in sync with slider (chosen mapping: slider -> TC).
+      TC = _lerp(0.2, 8.8, clamp01(mobileCtl.throttleN));
+    }
+
     // Throttle change is time-based. Preserve ~0.2 per tick @60Hz feel.
+    // In mobile mode, Q/E nudges on top of the slider and we reflect that back into throttleN.
     const TC_RATE = 12.0;
     if (keysDown.has("q")) TC += TC_RATE * dt;
     if (keysDown.has("e")) TC -= TC_RATE * dt;
     TC = clamp(TC, 0.2, 8.8);
+    if (IS_MOBILE) {
+      mobileCtl.throttleN = clamp01(_invLerp(0.2, 8.8, TC));
+    }
 
     // Toggle brakes (edge-triggered)
     const bDown = keysDown.has("b");
@@ -1387,6 +1598,14 @@
     let rudderIn = 0;
     if (keysDown.has("z")) rudderIn += 1;
     if (keysDown.has("c")) rudderIn -= 1;
+
+    // Mobile blending: add touch inputs to keyboard inputs.
+    if (IS_MOBILE) {
+      rollIn += mobileCtl.stickX;
+      // stickY is positive downward; invert so pushing up means nose up.
+      pitchIn += -mobileCtl.stickY;
+      rudderIn += mobileCtl.rudderN;
+    }
 
     // Control surfaces: self-centering with a smooth first-order response.
     // The straight port that *integrates* surface position can "wind up" and
@@ -2341,6 +2560,96 @@
     }
   }
 
+  // --- Mobile UI overlay controls (drawn on top of instruments) ---
+  function _roundRectPath(x, y, w, h, r) {
+    const rr = Math.min(r, w * 0.5, h * 0.5);
+    ctx.beginPath();
+    ctx.moveTo(x + rr, y);
+    ctx.arcTo(x + w, y, x + w, y + h, rr);
+    ctx.arcTo(x + w, y + h, x, y + h, rr);
+    ctx.arcTo(x, y + h, x, y, rr);
+    ctx.arcTo(x, y, x + w, y, rr);
+    ctx.closePath();
+  }
+  function drawMobileControls() {
+    if (!IS_MOBILE) return;
+    if (ended) return;
+
+    const L = mobileLayout();
+
+    ctx.save();
+    ctx.globalAlpha = 0.95;
+    ctx.strokeStyle = "#fff";
+    ctx.fillStyle = "#000";
+    ctx.lineWidth = 1;
+
+    const font = "8px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+    ctx.font = font;
+
+    // Stick (right)
+    {
+      const { cx, cy, r } = L.stick;
+      ctx.globalAlpha = 0.85;
+      ctx.beginPath(); ctx.arc(cx, cy, r, 0, 2 * PI); ctx.stroke();
+      // crosshair
+      line(cx - r, cy, cx + r, cy);
+      line(cx, cy - r, cx, cy + r);
+      // knob
+      const kx = cx + mobileCtl.stickX * r * 0.65;
+      const ky = cy + mobileCtl.stickY * r * 0.65;
+      ctx.globalAlpha = 0.95;
+      ctx.beginPath(); ctx.arc(kx, ky, 7, 0, 2 * PI); ctx.stroke();
+      textCentered(cx, cy - r - 6, "STICK");
+    }
+
+    // Throttle (left vertical)
+    {
+      const t = L.throttle;
+      ctx.globalAlpha = 0.9;
+      _roundRectPath(t.x, t.y, t.w, t.h, 4);
+      ctx.stroke();
+      // knob
+      const knobY = t.y + (1 - mobileCtl.throttleN) * t.h;
+      _roundRectPath(t.x - 4, knobY - 6, t.w + 8, 12, 5);
+      ctx.stroke();
+      // label
+      textCentered(t.x + t.w * 0.5, t.y - 6, "THROTTLE");
+    }
+
+    // Rudder (horizontal under throttle)
+    {
+      const r = L.rudder;
+      const w = (r.x1 - r.x0);
+      ctx.globalAlpha = 0.9;
+      _roundRectPath(r.x0, r.y, w, r.h, 4);
+      ctx.stroke();
+      const cx = (r.x0 + r.x1) * 0.5;
+      const knobX = cx + mobileCtl.rudderN * (w * 0.5);
+      _roundRectPath(knobX - 10, r.y - 4, 20, r.h + 8, 5);
+      ctx.stroke();
+      textCentered(cx, r.y - 6, "RUDDER");
+    }
+
+    // Buttons: Brake / Mute
+    {
+      const drawBtn = (b, label, active) => {
+        ctx.globalAlpha = 0.95;
+        _roundRectPath(b.x, b.y, b.w, b.h, 6);
+        ctx.stroke();
+        if (active) {
+          ctx.globalAlpha = 0.35;
+          ctx.fill();
+        }
+        ctx.globalAlpha = 0.95;
+        textCentered(b.x + b.w * 0.5, b.y + b.h * 0.72, label);
+      };
+      drawBtn(L.brakeBtn, "BRAKE", !!brake);
+      drawBtn(L.muteBtn, "MUTE", !!audioMuted);
+    }
+
+    ctx.restore();
+  }
+
   function render() {
     clearScreen();
     ctx.strokeStyle = "#fff";
@@ -2352,6 +2661,7 @@
     }
     drawInstrumentPanelBackground();
     drawInstrumentsAndHUD();
+    drawMobileControls();
     if (ended) drawEndScreen();
   }
 
