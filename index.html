@@ -460,6 +460,10 @@
   let three = null;
   let TERRAIN_SEED = (Date.now() ^ ((Math.random() * 0xffffffff) >>> 0)) >>> 0;
 
+  function _randU32() {
+    return (Date.now() ^ ((Math.random() * 0xffffffff) >>> 0) ^ ((performance.now() * 1000) >>> 0)) >>> 0;
+  }
+
   function mulberry32(seed) {
     let a = seed >>> 0;
     return function() {
@@ -635,6 +639,12 @@
     if (!USE_THREE_WORLD) return;
     if (!window.THREE) return;
 
+    // If the renderer already exists, rebuild terrain for the new seed.
+    if (three) {
+      rebuildThreeTerrain(TERRAIN_SEED);
+      return;
+    }
+
     const renderer = new THREE.WebGLRenderer({
       canvas: threeCanvas,
       antialias: !IS_MOBILE,
@@ -657,78 +667,177 @@
     dir.position.set(200, 400, 200);
     scene.add(dir);
 
-    // Terrain
-    // NOTE: Large grids require 32-bit element indices (WebGL2 or OES_element_index_uint).
-    // Many mobile browsers still run WebGL1 without that extension; in that case the terrain
-    // would fail to render. So we pick the largest safe size per device.
+    three = { renderer, scene, camera, terrainMesh: null, runwayMesh: null, terrainInfo: null };
+    rebuildThreeTerrain(TERRAIN_SEED);
+
+    function resize() {
+      const w = threeCanvas.clientWidth || 640;
+      const h = threeCanvas.clientHeight || 480;
+      renderer.setSize(w, h, false);
+      // Camera aspect is set per-frame in renderThreeWorld() to match the top window viewport.
+    }
+    window.addEventListener("resize", () => resize());
+    resize();
+
+    // three is set above
+  }
+
+  function rebuildThreeTerrain(seed) {
+    if (!USE_THREE_WORLD) return;
+    if (!three) return;
+    const { renderer, scene } = three;
+
+    // Remove old meshes
+    if (three.terrainMesh) {
+      scene.remove(three.terrainMesh);
+      try { three.terrainMesh.geometry.dispose(); } catch {}
+      try { three.terrainMesh.material.dispose(); } catch {}
+      three.terrainMesh = null;
+    }
+    if (three.runwayMesh) {
+      scene.remove(three.runwayMesh);
+      try { three.runwayMesh.geometry.dispose(); } catch {}
+      try { three.runwayMesh.material.dispose(); } catch {}
+      three.runwayMesh = null;
+    }
+
+    // Terrain params
     const hasUint32Elements =
       renderer.capabilities.isWebGL2 || renderer.extensions.has("OES_element_index_uint");
     let gridSize = 1025; // higher-res (2^n + 1) for desktop
     if (IS_MOBILE) gridSize = 257; // good detail, much lighter
     if ((gridSize * gridSize) > 65535 && !hasUint32Elements) gridSize = 129; // WebGL1-safe
 
-    // Bigger terrain so you don't "outrun" it.
     const planeSize = Math.max(120000, RUNWAY_LEN_M * 30);
-    const maxHeight = 650; // reverted mountain height range
-    const seaLevelN = 0.33; // lower sea level => less sand/water coverage
-    // Terrain heightmap via multi-octave 2D Perlin fBm:
-    // h(x,y)=Σ noise(x f_i, y f_i) a_i with increasing f_i and decreasing a_i.
-    const terrainH = fractalHeightmap(gridSize, {
-      seed: TERRAIN_SEED,
-      // More jagged/mountainous: more octaves + higher lacunarity + slower amplitude falloff.
-      // See discussion of octaves/persistence/lacunarity in fractal noise tutorials.
-      octaves: IS_MOBILE ? 8 : 10,
-      lacunarity: 2.25,
-      persistence: 0.62,
-      baseFreq: 0.0010,
-    });
+    const maxHeight = 650;
+    const seaLevelN = 0.33;
+    const CONTRAST = 2.3;
+    const POW = 1.35;
+
+    // Ensure runway area is not mountainous/valley-like: try multiple seeds.
+    const MAX_TRIES = 10;
+    let chosenSeed = seed >>> 0;
+    let terrainH = null;
+    for (let a = 0; a < MAX_TRIES; a++) {
+      const trySeed = (a === 0 ? chosenSeed : _randU32());
+      const hTry = fractalHeightmap(gridSize, {
+        seed: trySeed,
+        octaves: IS_MOBILE ? 8 : 10,
+        lacunarity: 2.25,
+        persistence: 0.62,
+        baseFreq: 0.0010,
+      });
+
+      // Suitability check around runway: must be broadly grassy and not steep.
+      const halfRunway = RUNWAY_LEN_M * 0.5;
+      const innerX = WR * 8;
+      const innerZ = halfRunway + 600;
+      const outerX = WR * 16;
+      const outerZ = halfRunway + 1800;
+      const grassTarget = 0.0;
+      const grassCap = 70; // keep below grass->rock threshold (80)
+
+      let minInner = Infinity, maxInner = -Infinity;
+      let maxDeltaOuter = 0;
+      const stride = IS_MOBILE ? 2 : 4;
+      for (let y = 0; y < gridSize; y += stride) {
+        const z = (y / (gridSize - 1) - 0.5) * planeSize;
+        const az = Math.abs(z);
+        if (az > outerZ) continue;
+        for (let x = 0; x < gridSize; x += stride) {
+          const px = (x / (gridSize - 1) - 0.5) * planeSize;
+          const ax = Math.abs(px);
+          if (ax > outerX) continue;
+          const hN0 = hTry[y * gridSize + x];
+          const hN1 = clamp01((hN0 - 0.5) * CONTRAST + 0.5);
+          const hN = Math.pow(hN1, POW);
+          const hY0 = (hN - seaLevelN) * maxHeight;
+
+          // inner region excludes runway itself, but we still want surrounding terrain to be grass-ish
+          if (ax <= innerX && az <= innerZ && !(ax <= WR && az <= halfRunway)) {
+            if (hY0 < minInner) minInner = hY0;
+            if (hY0 > maxInner) maxInner = hY0;
+          }
+
+          const d = Math.abs(clamp(hY0, grassTarget, grassCap) - grassTarget);
+          if (d > maxDeltaOuter) maxDeltaOuter = d;
+        }
+      }
+
+      const okGrassBand = (minInner > -8) && (maxInner < 90);
+      const okNotCliffy = maxDeltaOuter < 180;
+      if (okGrassBand && okNotCliffy) {
+        chosenSeed = trySeed;
+        terrainH = hTry;
+        break;
+      }
+    }
+    if (!terrainH) {
+      terrainH = fractalHeightmap(gridSize, {
+        seed: chosenSeed,
+        octaves: IS_MOBILE ? 8 : 10,
+        lacunarity: 2.25,
+        persistence: 0.62,
+        baseFreq: 0.0010,
+      });
+    }
+    TERRAIN_SEED = chosenSeed;
+
     const geom = new THREE.PlaneGeometry(planeSize, planeSize, gridSize - 1, gridSize - 1);
     geom.rotateX(-Math.PI / 2);
-
     const pos = geom.attributes.position;
     const colors = new Float32Array(pos.count * 3);
-    const heights = new Float32Array(pos.count); // final height per vertex (meters)
+    const heights = new Float32Array(pos.count);
     const color = new THREE.Color();
+
+    const halfRunway = RUNWAY_LEN_M * 0.5;
+    const innerX = WR * 8;
+    const innerZ = halfRunway + 600;
+    const outerX = WR * 16;
+    const outerZ = halfRunway + 1800;
+    const grassTarget = 0.0;
+    const grassCap = 70; // keep below grass->rock threshold (80)
+
+    const smoothstep = (t) => t * t * (3 - 2 * t);
 
     for (let i = 0; i < pos.count; i++) {
       const xIndex = i % gridSize;
       const yIndex = Math.floor(i / gridSize);
       const hN0 = terrainH[yIndex * gridSize + xIndex];
-      // Add stronger contrast: push highs higher and lows lower.
-      // (Keeps 0..1 range so seaLevelN still behaves predictably.)
-      const CONTRAST = 2.3;
       const hN1 = clamp01((hN0 - 0.5) * CONTRAST + 0.5);
-      const hN = Math.pow(hN1, 1.35);
+      const hN = Math.pow(hN1, POW);
+      let hY0 = (hN - seaLevelN) * maxHeight;
 
-      // Base height in meters. seaLevelN defines y=0.
-      let hY = (hN - seaLevelN) * maxHeight;
-
-      // Carve runway corridor so it's always visible and surrounded by grass.
-      // Geometry is centered at terrain.position.z = -RUNWAY_REF_Y, so local z=0 is runway center.
       const x = pos.getX(i);
       const z = pos.getZ(i);
-      const halfRunway = RUNWAY_LEN_M * 0.5;
+      const ax = Math.abs(x);
+      const az = Math.abs(z);
 
-      // Flatten the runway footprint slightly below y=0 so the runway plane (y=1) sits above it.
-      if (Math.abs(x) <= WR && Math.abs(z) <= halfRunway) {
+      let hY = hY0;
+
+      // Runway cut: always flat and slightly below 0 so the runway plane sits above it.
+      if (ax <= WR && az <= halfRunway) {
         hY = -1.0;
-      } else {
-        // Grass buffer around runway
-        const grassMarginX = WR * 5;       // widen grass around runway
-        const grassMarginZ = halfRunway + 300;
-        if (Math.abs(x) <= grassMarginX && Math.abs(z) <= grassMarginZ) {
-          hY = Math.max(hY, 1.0);
+      } else if (ax <= outerX && az <= outerZ) {
+        // Broad grass-height plateau around the runway so it's never in snow/rock or a narrow valley.
+        const hPlate = clamp(hY0, grassTarget, grassCap);
+        if (ax <= innerX && az <= innerZ) {
+          hY = hPlate;
+        } else {
+          const tx = clamp01((ax - innerX) / (outerX - innerX));
+          const tz = clamp01((az - innerZ) / (outerZ - innerZ));
+          const t = smoothstep(Math.max(tx, tz));
+          hY = hPlate + (hY0 - hPlate) * t;
         }
       }
 
       pos.setY(i, hY);
       heights[i] = hY;
 
-      // Color by *height in meters* so water/sand are strictly negative.
-      // Make water/sand "deeper": only sufficiently negative heights become sand/water.
-      if (hY < -60) color.setHex(0x245a9c);       // water (deep)
-      else if (hY < -20) color.setHex(0xcdbb8a);  // sand (deep)
-      else if (hY < 80) color.setHex(0x3f7f3f);   // grass (includes shallow negatives)
+      // Color by height (meters)
+      if (hY < -60) color.setHex(0x245a9c);       // water
+      else if (hY < -20) color.setHex(0xcdbb8a);  // sand
+      else if (hY < 80) color.setHex(0x3f7f3f);   // grass
       else if (hY < 260) color.setHex(0x6b6b6b);  // rock
       else color.setHex(0xf2f2f2);                // snow
       colors[i * 3 + 0] = color.r;
@@ -746,15 +855,13 @@
       flatShading: false,
     });
     const terrain = new THREE.Mesh(geom, mat);
-    // Center terrain so runway is roughly centered.
     terrain.position.set(0, 0, -RUNWAY_REF_Y);
     scene.add(terrain);
 
-    // Runway mesh (simple)
     const runwayGeom = new THREE.PlaneGeometry(WR * 2, RUNWAY_LEN_M);
     runwayGeom.rotateX(-Math.PI / 2);
     const runwayMat = new THREE.MeshStandardMaterial({
-      color: 0x000000, // black runway
+      color: 0x000000,
       roughness: 1.0,
       metalness: 0.0,
       polygonOffset: true,
@@ -762,29 +869,12 @@
       polygonOffsetUnits: -2,
     });
     const runway = new THREE.Mesh(runwayGeom, runwayMat);
-    // Place slightly above terrain (terrain is around y=0) to avoid z-fighting.
     runway.position.set(0, 1.0, -RUNWAY_REF_Y);
     scene.add(runway);
 
-    function resize() {
-      const w = threeCanvas.clientWidth || 640;
-      const h = threeCanvas.clientHeight || 480;
-      renderer.setSize(w, h, false);
-      // Camera aspect is set per-frame in renderThreeWorld() to match the top window viewport.
-    }
-    window.addEventListener("resize", () => resize());
-    resize();
-
-    three = {
-      renderer,
-      scene,
-      camera,
-      terrainInfo: {
-        gridSize,
-        planeSize,
-        heights,
-      }
-    };
+    three.terrainMesh = terrain;
+    three.runwayMesh = runway;
+    three.terrainInfo = { gridSize, planeSize, heights };
   }
 
   function sampleTerrainHeightM(px, py) {
@@ -827,6 +917,25 @@
       (py <= RUNWAY_END_Y);
     if (onRunwayFootprint) return 0;
     return sampleTerrainHeightM(px, py);
+  }
+
+  // Terrain collision is evaluated against the *airframe*, not a point.
+  const AIRFRAME_CLEARANCE_M = 1.6;
+
+  function sweptTerrainHit(prevX, prevY, prevZ, nextX, nextY, nextZ) {
+    // Sample along the segment to avoid tunneling through steep terrain at 60Hz.
+    const steps = 6;
+    for (let i = 1; i <= steps; i++) {
+      const t = i / steps;
+      const x = prevX + (nextX - prevX) * t;
+      const y = prevY + (nextY - prevY) * t;
+      const z = prevZ + (nextZ - prevZ) * t;
+      const g = groundAltitudeM(x, y);
+      if ((z - AIRFRAME_CLEARANCE_M) <= g) {
+        return { t, groundAlt: g, x, y, z };
+      }
+    }
+    return null;
   }
 
   function updateThreeCameraFromSim() {
@@ -2042,6 +2151,7 @@
   }
 
   function stepPhysics(dt) {
+    const prevX = PX, prevY = PY, prevZ = PZ;
     const loopTimeMs = Math.max(1, dt * 1000);
 
     // C++ ordering: power/flight dynamics, damping, ROC, apply rotations, integrate.
@@ -2072,10 +2182,12 @@
     // - If you hit terrain above runway altitude, it's always fatal.
     // - Only safe contact is at runway altitude (<= 0).
     if (started && USE_THREE_WORLD && three && three.terrainInfo) {
-      const gAlt = groundAltitudeM(PX, PY);
-      if (PZ <= gAlt) {
-        if (gAlt > 0.5) {
-          finishTerrainCrash(gAlt);
+      const hit = sweptTerrainHit(prevX, prevY, prevZ, PX, PY, PZ);
+      if (hit) {
+        // Move the aircraft to the impact sample for more consistent reporting.
+        PX = hit.x; PY = hit.y; PZ = hit.z;
+        if (hit.groundAlt > 0.5) {
+          finishTerrainCrash(hit.groundAlt);
           return;
         }
         // Safe contact at/under runway altitude: treat as landing event.
@@ -2085,7 +2197,7 @@
       }
     } else {
       // Fallback: flat ground at runway altitude.
-      if (PZ <= 0) {
+      if ((PZ - AIRFRAME_CLEARANCE_M) <= 0) {
         PZ = 0;
         finishLanding();
         return;
@@ -2565,7 +2677,9 @@
 
       if (started) {
         const LOC_FULL_SCALE_M = WR; // 50m => full-scale equals runway half-width (matches evaluation)
-        const loc = clamp(PX / LOC_FULL_SCALE_M, -1, 1);
+        // Localizer (no reverse sensing): needle indicates runway/course direction.
+        // bar right -> runway right (positive drift); bar left -> runway left (negative drift).
+        const loc = clamp((-PX) / LOC_FULL_SCALE_M, -1, 1);
 
         const glideDeg = 3.0;
         const dToThr = Math.max(0, -PY); // meters to runway threshold while on approach
@@ -2946,8 +3060,8 @@
     startEngineAudio();
     started = true;
     // New random terrain per flight start.
-    TERRAIN_SEED = (Date.now() ^ ((Math.random() * 0xffffffff) >>> 0)) >>> 0;
-    if (!three) initThreeWorld();
+    TERRAIN_SEED = _randU32();
+    initThreeWorld(); // will rebuild terrain if already initialized
     resetGame(ws, wd);
   });
 
