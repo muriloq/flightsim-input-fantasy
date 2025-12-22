@@ -672,6 +672,7 @@
 
     const pos = geom.attributes.position;
     const colors = new Float32Array(pos.count * 3);
+    const heights = new Float32Array(pos.count); // final height per vertex (meters)
     const color = new THREE.Color();
 
     for (let i = 0; i < pos.count; i++) {
@@ -706,13 +707,14 @@
       }
 
       pos.setY(i, hY);
+      heights[i] = hY;
 
       // Color by *height in meters* so water/sand are strictly negative.
       // Make water/sand "deeper": only sufficiently negative heights become sand/water.
       if (hY < -60) color.setHex(0x245a9c);       // water (deep)
       else if (hY < -20) color.setHex(0xcdbb8a);  // sand (deep)
       else if (hY < 80) color.setHex(0x3f7f3f);   // grass (includes shallow negatives)
-      else if (hY < 160) color.setHex(0x6b6b6b);  // rock
+      else if (hY < 260) color.setHex(0x6b6b6b);  // rock
       else color.setHex(0xf2f2f2);                // snow
       colors[i * 3 + 0] = color.r;
       colors[i * 3 + 1] = color.g;
@@ -758,7 +760,58 @@
     window.addEventListener("resize", () => resize());
     resize();
 
-    three = { renderer, scene, camera };
+    three = {
+      renderer,
+      scene,
+      camera,
+      terrainInfo: {
+        gridSize,
+        planeSize,
+        heights,
+      }
+    };
+  }
+
+  function sampleTerrainHeightM(px, py) {
+    if (!three || !three.terrainInfo) return 0;
+    const { gridSize, planeSize, heights } = three.terrainInfo;
+
+    // Map sim (PX, PY) to terrain local plane coords (x, z).
+    // Three Z = -PY and terrain.position.z = -RUNWAY_REF_Y, so localZ = (-PY) - (-RUNWAY_REF_Y).
+    const localX = px;
+    const localZ = -(py - RUNWAY_REF_Y);
+
+    // Normalize to [0..1] across plane.
+    const u = clamp01(localX / planeSize + 0.5);
+    const v = clamp01(localZ / planeSize + 0.5);
+
+    const fx = u * (gridSize - 1);
+    const fy = v * (gridSize - 1);
+    const x0 = Math.floor(fx);
+    const y0 = Math.floor(fy);
+    const x1 = Math.min(gridSize - 1, x0 + 1);
+    const y1 = Math.min(gridSize - 1, y0 + 1);
+    const tx = fx - x0;
+    const ty = fy - y0;
+
+    const idx = (x, y) => y * gridSize + x;
+    const h00 = heights[idx(x0, y0)];
+    const h10 = heights[idx(x1, y0)];
+    const h01 = heights[idx(x0, y1)];
+    const h11 = heights[idx(x1, y1)];
+    const hx0 = h00 + (h10 - h00) * tx;
+    const hx1 = h01 + (h11 - h01) * tx;
+    return hx0 + (hx1 - hx0) * ty;
+  }
+
+  function groundAltitudeM(px, py) {
+    // Runway is treated as altitude 0 for physics/landing evaluation.
+    const onRunwayFootprint =
+      (Math.abs(px) <= WR) &&
+      (py >= RUNWAY_START_Y) &&
+      (py <= RUNWAY_END_Y);
+    if (onRunwayFootprint) return 0;
+    return sampleTerrainHeightM(px, py);
   }
 
   function updateThreeCameraFromSim() {
@@ -1970,10 +2023,28 @@
     PX += WX * dt;
     PY += WY * dt;
 
-    // Ground contact => finish
-    if (PZ <= 0) {
-      PZ = 0;
-      finishLanding();
+    // Terrain / ground contact:
+    // - If you hit terrain above runway altitude, it's always fatal.
+    // - Only safe contact is at runway altitude (<= 0).
+    if (started && USE_THREE_WORLD && three && three.terrainInfo) {
+      const gAlt = groundAltitudeM(PX, PY);
+      if (PZ <= gAlt) {
+        if (gAlt > 0.5) {
+          finishTerrainCrash(gAlt);
+          return;
+        }
+        // Safe contact at/under runway altitude: treat as landing event.
+        PZ = 0;
+        finishLanding();
+        return;
+      }
+    } else {
+      // Fallback: flat ground at runway altitude.
+      if (PZ <= 0) {
+        PZ = 0;
+        finishLanding();
+        return;
+      }
     }
   }
 
@@ -2020,6 +2091,21 @@
     endMessage.push(`ROTACAO DO MOTOR  = ${Math.floor(rpm)} RPM`);
     endMessage.push(`DESVIO DA PISTA   = ${Math.floor(PX)} M`);
     endMessage.push(`DIRECAO           = ${Math.floor(AD)} GRAUS`);
+    endMessage.push("");
+    endMessage.push("REINICIAR? (R/N)");
+  }
+
+  function finishTerrainCrash(groundAlt) {
+    keysDown.clear();
+    running = false;
+    ended = true;
+    stopEngineAudio();
+
+    endMessage = [];
+    endMessage.push("CRASH (TERRAIN)");
+    endMessage.push(`ALTITUDE= ${Math.floor(PZ)} M`);
+    endMessage.push(`TERRAIN = ${Math.floor(groundAlt)} M`);
+    endMessage.push(`AIRSPEED = ${Math.floor(Math.max(0, h_speed_mph * MPH_TO_MPS) * MPS_TO_KMH)} KM/H`);
     endMessage.push("");
     endMessage.push("REINICIAR? (R/N)");
   }
