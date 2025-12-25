@@ -69,7 +69,7 @@
     </div>
   </div>
 
-  <script src="vendor/three.min.js"></script>
+  <script src="vendor/three.min.js?v=160-no-warn-fix1"></script>
 <script>
 (() => {
   // Logical resolution (simulation/render layout coordinates).
@@ -591,7 +591,7 @@
 
   function fbm2D(x, y, {
     perm,
-    octaves = 6,
+    octaves = 9,
     lacunarity = 2.0,
     persistence = 0.5,
     baseFreq = 0.0018,
@@ -612,7 +612,7 @@
 
   function fractalHeightmap(size, {
     seed = 1337,
-    octaves = 7,
+    octaves = 10,
     lacunarity = 2.05,
     persistence = 0.52,
     baseFreq = 0.0016,
@@ -2191,8 +2191,8 @@
           return;
         }
         // Safe contact at/under runway altitude: treat as landing event.
-        PZ = 0;
-        finishLanding();
+      PZ = 0;
+      finishLanding();
         return;
       }
     } else {
@@ -3013,7 +3013,7 @@
     if (USE_THREE_WORLD) {
       renderThreeWorld();
     } else {
-      drawWindowAndRunway();
+    drawWindowAndRunway();
     }
     drawInstrumentPanelBackground();
     drawInstrumentsAndHUD();
