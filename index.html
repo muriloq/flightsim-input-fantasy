@@ -69,7 +69,7 @@
     </div>
   </div>
 
-  <script src="vendor/three.min.js?v=160-no-warn-fix1"></script>
+  <script src="vendor/three.min.js?v=160-no-warn-fix2"></script>
 <script>
 (() => {
   // Logical resolution (simulation/render layout coordinates).
@@ -458,6 +458,8 @@
   // --- Three.js world (terrain + runway) ---
   const USE_THREE_WORLD = true;
   let three = null;
+  let threeInitFailed = false;
+  let threeInitError = "";
   let TERRAIN_SEED = (Date.now() ^ ((Math.random() * 0xffffffff) >>> 0)) >>> 0;
 
   function _randU32() {
@@ -637,7 +639,8 @@
 
   function initThreeWorld() {
     if (!USE_THREE_WORLD) return;
-    if (!window.THREE) return;
+    if (threeInitFailed) return;
+    if (!window.THREE) { threeInitFailed = true; threeInitError = "THREE not available"; return; }
 
     // If the renderer already exists, rebuild terrain for the new seed.
     if (three) {
@@ -645,12 +648,19 @@
       return;
     }
 
-    const renderer = new THREE.WebGLRenderer({
-      canvas: threeCanvas,
-      antialias: !IS_MOBILE,
-      alpha: false,
-      powerPreference: IS_MOBILE ? "low-power" : "high-performance",
-    });
+    let renderer;
+    try {
+      renderer = new THREE.WebGLRenderer({
+        canvas: threeCanvas,
+        antialias: !IS_MOBILE,
+        alpha: false,
+        powerPreference: IS_MOBILE ? "low-power" : "high-performance",
+      });
+    } catch (e) {
+      threeInitFailed = true;
+      threeInitError = (e && e.message) ? e.message : "WebGLRenderer creation failed";
+      return;
+    }
     // Mobile fill-rate is precious; also avoids huge drawing buffers.
     renderer.setPixelRatio(Math.min(IS_MOBILE ? 1.5 : 2, window.devicePixelRatio || 1));
     renderer.setSize(threeCanvas.clientWidth || 640, threeCanvas.clientHeight || 480, false);
@@ -3197,10 +3207,11 @@
     clearScreen();
     ctx.strokeStyle = "#fff";
     ctx.fillStyle = "#fff";
-    if (USE_THREE_WORLD) {
+    if (USE_THREE_WORLD && three && !threeInitFailed) {
       renderThreeWorld();
     } else {
-    drawWindowAndRunway();
+      // Fallback: never show a blank outside view if WebGL/Three.js is unavailable.
+      drawWindowAndRunway();
     }
     drawInstrumentPanelBackground();
     drawInstrumentsAndHUD();
