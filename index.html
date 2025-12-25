@@ -2640,25 +2640,27 @@
     const driftM = started ? PX : 0;
 
     // Compact nav/status readout in the space freed by moving TURN away from VARIO:
-    // label on the left, value aligned to the right.
+    // Each item is two lines (label, then value below) to free space under RPM.
     {
-      // Column-align: labels under VARIO, values under RPM.
-      const xLabel = cxVario;
-      const xValue = cxRpm;
-      const y0 = 150 + UI_Y_OFF;
-      const dy = 12;
+      // Keep the whole block in the VARIO column so the area under RPM stays clear.
+      const x = cxVario;
+      // Anchor RUNAWAY label to the top of the bottom dials (e.g. compass):
+      // bottom dials are centered at (yBotLabel + 4) with radius dialR.
+      const y0 = (yBotLabel + 4) - dialR;
+      const itemGap = 16;   // vertical spacing between labels
+      const valueGap = 6;   // value below label (smaller than value->next-label gap)
       ctx.font = FONT_LABEL;
-      textCentered(xLabel, y0, "RUNAWAY DEG");
-      textCentered(xLabel, y0 + dy, "DRIFT (M)");
-      textCentered(xLabel, y0 + dy * 2, "DIST (M)");
+      textCentered(x, y0, "RUNAWAY DEG");
+      textCentered(x, y0 + itemGap, "DRIFT (M)");
+      textCentered(x, y0 + itemGap * 2, "DIST (M)");
 
       ctx.font = FONT_VALUE;
       const v1 = `${Math.floor(RB)}`;
       const v2 = `${Math.floor(driftM)}`;
       const v3 = `${Math.floor(dist)}`;
-      textCentered(xValue, y0, v1);
-      textCentered(xValue, y0 + dy, v2);
-      textCentered(xValue, y0 + dy * 2, v3);
+      textCentered(x, y0 + valueGap, v1);
+      textCentered(x, y0 + itemGap + valueGap, v2);
+      textCentered(x, y0 + itemGap * 2 + valueGap, v3);
     }
 
     // ILS (minimal): below ALTITUDE dial.
