@@ -737,7 +737,7 @@
       const hTry = fractalHeightmap(gridSize, {
         seed: trySeed,
         // Reduce octaves slightly on desktop to keep generation and geometry stable on Edge.
-        octaves: (IS_MOBILE || IS_EDGE) ? 8 : 10,
+        octaves: (IS_MOBILE || IS_EDGE) ? 6 : 10,
         lacunarity: 2.25,
         persistence: 0.62,
         baseFreq: 0.0010,
@@ -974,23 +974,21 @@
 
     // Mobile browsers can change layout height (URL bar show/hide) without a resize event.
     // Keep the WebGL drawing buffer in sync with the displayed canvas size.
-    {
-      // Use the overlay canvas rect as the source-of-truth for displayed size so Three.js
-      // always matches the instrument canvas (prevents right-side gaps on desktop too).
-      const rect = canvas.getBoundingClientRect();
-      const w = Math.max(1, Math.round(rect.width));
-      const h = Math.max(1, Math.round(rect.height));
-      const s = renderer.getSize(new THREE.Vector2()); // CSS pixels
-      if (Math.round(s.x) !== Math.round(w) || Math.round(s.y) !== Math.round(h)) {
-        renderer.setSize(w, h, false);
-      }
+    // Use the overlay canvas rect as the source-of-truth for displayed size so Three.js
+    // always matches the instrument canvas (prevents right-side gaps on desktop too).
+    const rect = canvas.getBoundingClientRect();
+    const w = Math.max(1, Math.round(rect.width));
+    const h = Math.max(1, Math.round(rect.height));
+    const s = renderer.getSize(new THREE.Vector2()); // CSS pixels
+    if (Math.round(s.x) !== Math.round(w) || Math.round(s.y) !== Math.round(h)) {
+      renderer.setSize(w, h, false);
     }
 
     // Render only into the top window region (so the camera is centered in that window).
-    // Use the drawing buffer size (device pixels) to avoid DPR/layout mismatches on mobile.
-    const db = renderer.getDrawingBufferSize(new THREE.Vector2());
-    const fullW = Math.max(1, db.x | 0);
-    const fullH = Math.max(1, db.y | 0);
+    // IMPORTANT: setViewport/setScissor take CSS pixels in Three.js (it applies pixelRatio internally).
+    // Using drawing-buffer pixels here can make the rendered region look "too small" on some Chromium/Edge setups.
+    const fullW = w;
+    const fullH = h;
     const topH = Math.max(1, Math.floor(fullH * (TOP_WINDOW_H / H)));
 
     renderer.setScissorTest(true);
