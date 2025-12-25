@@ -90,6 +90,7 @@
   const IS_MOBILE =
     (window.matchMedia && window.matchMedia("(pointer: coarse)").matches) ||
     /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent || "");
+  const IS_EDGE = /Edg\//.test(navigator.userAgent || "");
   // Logical pixels: height of 3D window area at the top.
   // Make it bigger on mobile so the outside view uses more of the screen.
   // Keep it above the top-row dial centers so instruments remain over an opaque panel,
@@ -661,8 +662,10 @@
       threeInitError = (e && e.message) ? e.message : "WebGLRenderer creation failed";
       return;
     }
-    // Mobile fill-rate is precious; also avoids huge drawing buffers.
-    renderer.setPixelRatio(Math.min(IS_MOBILE ? 1.5 : 2, window.devicePixelRatio || 1));
+    // Mobile/Edge fill-rate is precious; also avoids huge drawing buffers.
+    // Edge/Chromium can fail to allocate large render targets on some GPUs/drivers.
+    const prCap = IS_MOBILE ? 1.5 : (IS_EDGE ? 1.25 : 2);
+    renderer.setPixelRatio(Math.min(prCap, window.devicePixelRatio || 1));
     renderer.setSize(threeCanvas.clientWidth || 640, threeCanvas.clientHeight || 480, false);
 
     const scene = new THREE.Scene();
@@ -714,8 +717,9 @@
     // Terrain params
     const hasUint32Elements =
       renderer.capabilities.isWebGL2 || renderer.extensions.has("OES_element_index_uint");
-    let gridSize = 1025; // higher-res (2^n + 1) for desktop
-    if (IS_MOBILE) gridSize = 257; // good detail, much lighter
+    // Default to a safer grid size for Edge/Chromium to avoid GPU/VRAM allocation failures.
+    // 1025x1025 can be too heavy on some systems even if WebGL2 is available.
+    let gridSize = IS_MOBILE ? 257 : (IS_EDGE ? 513 : 1025); // 2^n + 1
     if ((gridSize * gridSize) > 65535 && !hasUint32Elements) gridSize = 129; // WebGL1-safe
 
     const planeSize = Math.max(120000, RUNWAY_LEN_M * 30);
@@ -732,7 +736,8 @@
       const trySeed = (a === 0 ? chosenSeed : _randU32());
       const hTry = fractalHeightmap(gridSize, {
         seed: trySeed,
-        octaves: IS_MOBILE ? 8 : 10,
+        // Reduce octaves slightly on desktop to keep generation and geometry stable on Edge.
+        octaves: (IS_MOBILE || IS_EDGE) ? 8 : 10,
         lacunarity: 2.25,
         persistence: 0.62,
         baseFreq: 0.0010,
