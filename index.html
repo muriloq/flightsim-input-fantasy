@@ -1109,6 +1109,10 @@
     // Square frame a few pixels larger than the outer circle diameter.
     const pad = 1;
     const half = outerR + pad;
+    squareBezel(cx, cy, half);
+  }
+
+  function squareBezel(cx, cy, half) {
     ctx.save();
     ctx.lineWidth = 1 / _pxScale;
     ctx.strokeRect(cx - half, cy - half, half * 2, half * 2);
@@ -1116,7 +1120,7 @@
     // Corner screws: 5px diameter circles with a small "slot" line.
     const screwR = 1.5;
     const slotLen = 3;
-    const screw_pad = outerR - 2;
+    const screw_pad = half - 3;
     const corners = [
       [cx - screw_pad, cy - screw_pad],
       [cx + screw_pad, cy - screw_pad],
@@ -1134,6 +1138,61 @@
       line(sx - dx, sy - dy, sx + dx, sy + dy);
     }
     ctx.restore();
+  }
+
+  function _marchingSquaresSegments(grid, nx, ny, levels) {
+    // grid is Float32Array length nx*ny, row-major (x changes fastest).
+    // returns array of segments: {x1,y1,x2,y2, level}
+    const segs = [];
+    const idx = (x, y) => y * nx + x;
+    const lerpPt = (xA, yA, vA, xB, yB, vB, level) => {
+      const t = (level - vA) / (vB - vA);
+      return [xA + (xB - xA) * t, yA + (yB - yA) * t];
+    };
+    for (let yi = 0; yi < ny - 1; yi++) {
+      for (let xi = 0; xi < nx - 1; xi++) {
+        const v00 = grid[idx(xi, yi)];
+        const v10 = grid[idx(xi + 1, yi)];
+        const v01 = grid[idx(xi, yi + 1)];
+        const v11 = grid[idx(xi + 1, yi + 1)];
+
+        for (const level of levels) {
+          // Bitmask: 1=v00, 2=v10, 4=v11, 8=v01 (clockwise)
+          const b0 = v00 >= level ? 1 : 0;
+          const b1 = v10 >= level ? 1 : 0;
+          const b2 = v11 >= level ? 1 : 0;
+          const b3 = v01 >= level ? 1 : 0;
+          const code = b0 | (b1 << 1) | (b2 << 2) | (b3 << 3);
+          if (code === 0 || code === 15) continue;
+
+          // Cell corners (in grid coords)
+          const x0 = xi, y0 = yi;
+          const x1 = xi + 1, y1 = yi + 1;
+
+          // Intersections on edges: top (v00-v10), right (v10-v11), bottom (v01-v11), left (v00-v01)
+          const pts = [];
+          if ((b0 ^ b1) === 1) pts.push(lerpPt(x0, y0, v00, x1, y0, v10, level)); // top
+          if ((b1 ^ b2) === 1) pts.push(lerpPt(x1, y0, v10, x1, y1, v11, level)); // right
+          if ((b3 ^ b2) === 1) pts.push(lerpPt(x0, y1, v01, x1, y1, v11, level)); // bottom
+          if ((b0 ^ b3) === 1) pts.push(lerpPt(x0, y0, v00, x0, y1, v01, level)); // left
+
+          if (pts.length === 2) {
+            segs.push({ x1: pts[0][0], y1: pts[0][1], x2: pts[1][0], y2: pts[1][1], level });
+          } else if (pts.length === 4) {
+            // Ambiguous saddle: choose pairing by average vs level.
+            const avg = (v00 + v10 + v01 + v11) * 0.25;
+            if (avg >= level) {
+              segs.push({ x1: pts[0][0], y1: pts[0][1], x2: pts[1][0], y2: pts[1][1], level });
+              segs.push({ x1: pts[2][0], y1: pts[2][1], x2: pts[3][0], y2: pts[3][1], level });
+            } else {
+              segs.push({ x1: pts[0][0], y1: pts[0][1], x2: pts[3][0], y2: pts[3][1], level });
+              segs.push({ x1: pts[1][0], y1: pts[1][1], x2: pts[2][0], y2: pts[2][1], level });
+            }
+          }
+        }
+      }
+    }
+    return segs;
   }
   function needle(cx, cy, len, aRad) {
     // Narrow lozenge (diamond) pointer instead of a single line.
@@ -2880,6 +2939,127 @@
       ctx.beginPath();
       ctx.arc(ballX, trackY, 3 * 0.8 * 0.5, 0, 2 * PI);
       ctx.fill();
+    }
+
+    // Terrain mini-map (top-down isolines): square instrument in the space below RPM.
+    {
+      const cx = cxRpm;
+      const cy = yBotLabel + 4; // align with other bottom dials
+      const half = (dialR + 2) + 1; // match dialBezel square: outerR=r+2, pad=1
+
+      // Bezel
+      squareBezel(cx, cy, half);
+
+      // Inner drawing area (clipped)
+      // Keep well away from the corner screws so the map never draws over them.
+      const pad = 5;
+      const ix0 = cx - half + pad;
+      const iy0 = cy - half + pad;
+      const iw = (half * 2) - pad * 2;
+      const ih = (half * 2) - pad * 2;
+
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(ix0, iy0, iw, ih);
+      ctx.clip();
+
+      // Background
+      ctx.save();
+      ctx.globalAlpha = 1.0;
+      ctx.fillStyle = "#000";
+      ctx.fillRect(ix0, iy0, iw, ih);
+      ctx.restore();
+
+      // Map scale (meters). Center on runway reference point (0, RUNWAY_REF_Y).
+      const MAP_HALF_RANGE_M = 10000; // tune: how far from runway center the map covers
+      const centerX = 0;
+      const centerY = RUNWAY_REF_Y;
+
+      // Sample heights on a small grid and draw isolines.
+      const nx = 17, ny = 17; // coarse but enough for a small instrument
+      const grid = new Float32Array(nx * ny);
+      let hMin = Infinity, hMax = -Infinity;
+      for (let y = 0; y < ny; y++) {
+        for (let x = 0; x < nx; x++) {
+          const u = x / (nx - 1);
+          const v = y / (ny - 1);
+          const wx = centerX + (u * 2 - 1) * MAP_HALF_RANGE_M;
+          const wy = centerY + (v * 2 - 1) * MAP_HALF_RANGE_M;
+          const h = (USE_THREE_WORLD && three && three.terrainInfo) ? sampleTerrainHeightM(wx, wy) : 0;
+          grid[y * nx + x] = h;
+          if (h < hMin) hMin = h;
+          if (h > hMax) hMax = h;
+        }
+      }
+      if (!isFinite(hMin) || !isFinite(hMax)) { hMin = 0; hMax = 0; }
+
+      // Choose contour spacing.
+      const span = Math.max(1e-6, hMax - hMin);
+      const step = span > 800 ? 200 : span > 400 ? 100 : 50;
+      const l0 = Math.floor(hMin / step) * step;
+      const l1 = Math.ceil(hMax / step) * step;
+      const levels = [];
+      for (let L = l0; L <= l1; L += step) levels.push(L);
+
+      const segs = _marchingSquaresSegments(grid, nx, ny, levels);
+      ctx.save();
+      ctx.strokeStyle = "#8a8a8a";
+      ctx.globalAlpha = 0.85;
+      for (const s of segs) {
+        // Map grid coords [0..nx-1],[0..ny-1] into inner rect.
+        const x1 = ix0 + (s.x1 / (nx - 1)) * iw;
+        const y1 = iy0 + (s.y1 / (ny - 1)) * ih;
+        const x2 = ix0 + (s.x2 / (nx - 1)) * iw;
+        const y2 = iy0 + (s.y2 / (ny - 1)) * ih;
+        line(x1, y1, x2, y2);
+      }
+      ctx.restore();
+
+      // Runway outline (centered)
+      {
+        const rw = WR * 2;
+        const rl = RUNWAY_LEN_M;
+        const x0 = centerX - rw * 0.5;
+        const x1 = centerX + rw * 0.5;
+        const y0 = centerY - rl * 0.5;
+        const y1 = centerY + rl * 0.5;
+        const mapX = (wx) => ix0 + ((wx - (centerX - MAP_HALF_RANGE_M)) / (MAP_HALF_RANGE_M * 2)) * iw;
+        // Map convention: +Y (forward, toward runway) should go UP on the map.
+        // Canvas Y grows downward, so invert v.
+        const mapY = (wy) => iy0 + (1 - ((wy - (centerY - MAP_HALF_RANGE_M)) / (MAP_HALF_RANGE_M * 2))) * ih;
+        ctx.save();
+        ctx.strokeStyle = "#fff";
+        ctx.globalAlpha = 0.9;
+        ctx.lineWidth = 1 / _pxScale;
+        ctx.strokeRect(mapX(x0), mapY(y0), mapX(x1) - mapX(x0), mapY(y1) - mapY(y0));
+        ctx.restore();
+      }
+
+      // Plane marker: location + heading arrow.
+      if (started) {
+        const mapX = (wx) => ix0 + ((wx - (centerX - MAP_HALF_RANGE_M)) / (MAP_HALF_RANGE_M * 2)) * iw;
+        const mapY = (wy) => iy0 + (1 - ((wy - (centerY - MAP_HALF_RANGE_M)) / (MAP_HALF_RANGE_M * 2))) * ih;
+        const px = mapX(PX);
+        const py = mapY(PY);
+        const a = AD * C; // 0 = +Y (up on map)
+        const dx = Math.sin(a);
+        const dy = -Math.cos(a);
+        const len = 2.5;
+        ctx.save();
+        ctx.translate(px, py);
+        // Arrow triangle
+        ctx.beginPath();
+        ctx.moveTo(dx * len, dy * len);
+        ctx.lineTo(-dx * len * 0.6 + (-dy) * len * 0.4, -dy * len * 0.6 + (dx) * len * 0.4);
+        ctx.lineTo(-dx * len * 0.6 - (-dy) * len * 0.4, -dy * len * 0.6 - (dx) * len * 0.4);
+        ctx.closePath();
+        ctx.fillStyle = "#fff";
+        ctx.globalAlpha = 0.95;
+        ctx.fill();
+        ctx.restore();
+      }
+
+      ctx.restore();
     }
 
     // RPM needle (scaled to 0..~9000 mapped to 0..5*PI)
