@@ -2836,12 +2836,13 @@
       line(cx + m, cy, cx + m - 5, cy);
 
       // Compute yaw rate (deg/s) from per-step delta.
+      // Convention in this sim: +yaw rate = turning right.
       const yawRateDps = deltaVect.dYaw * SIM_HZ;
 
-      // Standard rate turn (2 min) is ~3 deg/s.
-      const stdRateDps = 3.0;
-      const bankNeedleDeg = clamp(yawRateDps / stdRateDps, -1, 1) * 25;
-      const bankNeedleRad = bankNeedleDeg * C;
+      // Turn coordinator: bank the miniature airplane with BANK ANGLE (not turn rate),
+      // so it matches the attitude indicator direction when you roll the yoke.
+      // Clamp to a sensible instrument range.
+      const bankNeedleRad = clamp(roll, -30, 30) * C;
 
       // Draw "airplane": wings + small fuselage. Rotate by turn indication.
       ctx.save();
@@ -2869,7 +2870,11 @@
       line(cx - r * 0.10, trackY - 3, cx - r * 0.10, trackY + 3);
       line(cx + r * 0.10, trackY - 3, cx + r * 0.10, trackY + 3);
 
-      const ballX = cx + clamp(slipDps / 3.0, -1, 1) * trackHalf;
+      // Sign: ball should move opposite the "excess yaw into the turn" sense.
+      // Right turn:
+      // - skid (too much yaw rate): ball to the LEFT (outside)
+      // - slip (too little yaw rate): ball to the RIGHT (inside)
+      const ballX = cx - clamp(slipDps / 3.0, -1, 1) * trackHalf;
       ctx.beginPath();
       ctx.arc(ballX, trackY, 3 * 0.8 * 0.5, 0, 2 * PI);
       ctx.fill();
